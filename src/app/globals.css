@@ -1,0 +1,10 @@
+@import "tailwindcss";
+
+html,
+body {
+  margin: 0;
+  background: #022c22;
+  color: white;
+  font-family:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
