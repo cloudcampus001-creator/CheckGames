@@ -1,38 +1,31 @@
 /**
  * End-to-end check of the HTTP layer: calls the route handlers with real
- * Request objects and reads the live event stream like a browser would.
+ * Request objects and follows the game by asking for the state, like a browser
+ * does. The whole scenario runs twice: against the in-memory store and against
+ * a stand-in for Upstash Redis.
  */
 import assert from "node:assert/strict";
 import { POST as actionRoute } from "@/app/api/rooms/[code]/action/route";
-import { GET as eventsRoute } from "@/app/api/rooms/[code]/events/route";
 import { POST as joinRoute } from "@/app/api/rooms/[code]/join/route";
+import { GET as stateRoute } from "@/app/api/rooms/[code]/state/route";
+import { GET as healthRoute } from "@/app/api/health/route";
 import { POST as createRoute } from "@/app/api/rooms/route";
 import type { RoomView } from "@/multiplayer/protocol";
-import { configureRooms, resetRooms } from "./rooms";
+import { configureRooms } from "./rooms";
+import { createMemoryStore, createRedisStore, useStore } from "./store";
+import { type FakeUpstash, startFakeUpstash } from "./test-support/fake-upstash";
 
 configureRooms({ botDelayMax: 2, botDelayMin: 0 });
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function waitFor(condition: () => boolean, label: string, ms = 5000) {
-  const started = Date.now();
-
-  while (!condition()) {
-    if (Date.now() - started > ms) {
-      throw new Error(`Timed out waiting for: ${label}`);
-    }
-
-    await sleep(2);
-  }
-}
-
 type Json = Record<string, unknown>;
+type Handler = (
+  request: Request,
+  context: { params: Promise<{ code: string }> },
+) => Promise<Response>;
 
-async function post(
-  handler: (request: Request, context: { params: Promise<{ code: string }> }) => Promise<Response>,
-  code: string,
-  body: unknown,
-) {
+async function post(handler: Handler, code: string, body: unknown) {
   const response = await handler(
     new Request("http://localhost:3000/api", {
       body: typeof body === "string" ? body : JSON.stringify(body),
@@ -44,114 +37,137 @@ async function post(
   return { body: (await response.json()) as Json, status: response.status };
 }
 
-type Stream = {
-  close: () => void;
-  ended: () => boolean;
-  fatal: string | null;
-  headers: Headers;
-  latest: () => RoomView | null;
+type Poll = {
+  body: { error?: string; etag?: string; fatal?: boolean; ok: boolean; view?: RoomView | null };
+  cacheControl: string | null;
+  status: number;
 };
 
-async function openStream(code: string, seat: string, token: string): Promise<Stream> {
-  const abort = new AbortController();
-  const response = await eventsRoute(
+async function poll(code: string, seat: string, token: string, since: string): Promise<Poll> {
+  const response = await stateRoute(
     new Request(
-      `http://localhost:3000/api/rooms/${code}/events?seat=${seat}&token=${token}`,
-      { signal: abort.signal },
+      `http://localhost:3000/api/rooms/${code}/state?seat=${seat}&token=${token}&since=${encodeURIComponent(since)}`,
     ),
     { params: Promise.resolve({ code }) },
   );
-  const reader = (response.body as ReadableStream<Uint8Array>).getReader();
-  const decoder = new TextDecoder();
-  let latest: RoomView | null = null;
-  let ended = false;
-  const stream: Stream = {
-    close: () => abort.abort(),
-    ended: () => ended,
-    fatal: null,
-    headers: response.headers,
-    latest: () => latest,
+
+  return {
+    body: (await response.json()) as Poll["body"],
+    cacheControl: response.headers.get("cache-control"),
+    status: response.status,
   };
-
-  void (async () => {
-    let buffer = "";
-
-    for (;;) {
-      const { done, value } = await reader.read();
-
-      if (done) {
-        ended = true;
-
-        return;
-      }
-
-      buffer += decoder.decode(value, { stream: true });
-
-      for (let end = buffer.indexOf("\n\n"); end !== -1; end = buffer.indexOf("\n\n")) {
-        const frame = buffer.slice(0, end);
-
-        buffer = buffer.slice(end + 2);
-
-        const eventLine = frame.split("\n").find((line) => line.startsWith("event: "));
-        const dataLine = frame.split("\n").find((line) => line.startsWith("data: "));
-
-        if (!eventLine || !dataLine) {
-          continue;
-        }
-
-        const event = eventLine.slice(7);
-        const data = JSON.parse(dataLine.slice(6));
-
-        if (event === "state") {
-          latest = data as RoomView;
-        } else if (event === "fatal") {
-          stream.fatal = (data as { reason: string }).reason;
-        }
-      }
-    }
-  })();
-
-  return stream;
 }
 
-async function main() {
-  // create a game
-  const created = await post(
-    createRoute as never,
-    "",
-    { name: "Amina" },
-  );
+/** A simulated browser: keeps the latest view, asks for news. */
+function browser(code: string, seat: string, token: string) {
+  const state = { etag: "", view: null as RoomView | null };
 
-  assert.equal(created.status, 200);
+  return {
+    code,
+    get view() {
+      return state.view;
+    },
+    seat,
+    async refresh() {
+      const result = await poll(code, seat, token, state.etag);
+
+      assert.equal(result.status, 200, `poll should work: ${JSON.stringify(result.body)}`);
+
+      if (result.body.etag) {
+        state.etag = result.body.etag;
+      }
+
+      if (result.body.view) {
+        state.view = result.body.view;
+      }
+
+      return state.view;
+    },
+    token,
+  };
+}
+
+async function scenario(label: string) {
+  // create a game
+  const created = await post(createRoute as never, "", { name: "Amina" });
+
+  assert.equal(created.status, 200, label);
 
   const code = String(created.body.code);
   const host = { seat: String(created.body.seatId), token: String(created.body.token) };
 
   assert.match(code, /^[A-Z2-9]{4}$/);
 
-  // host connects and sees the lobby
-  const hostStream = await openStream(code, host.seat, host.token);
+  // the host asks and sees the lobby
+  const first = await poll(code, host.seat, host.token, "");
 
-  assert.match(hostStream.headers.get("content-type") ?? "", /text\/event-stream/);
-  await waitFor(() => hostStream.latest()?.phase === "lobby", "host sees the lobby");
-  assert.equal(hostStream.latest()?.seats.length, 1);
-  assert.equal(hostStream.latest()?.you, host.seat);
+  assert.equal(first.status, 200);
+  assert.equal(first.cacheControl, "no-store", "never cached by a proxy");
+  assert.equal(first.body.view?.you, host.seat);
+  assert.equal(first.body.view?.phase, "lobby");
+  assert.equal(first.body.view?.seats.length, 1);
 
-  // a friend joins by code, host's stream updates live
+  // nothing new: a short answer
+  const quiet = await poll(code, host.seat, host.token, first.body.etag ?? "");
+
+  assert.equal(quiet.status, 200);
+  assert.equal(quiet.body.view, null);
+
+  // a change shows up on the next poll
+  assert.equal(
+    (
+      await post(actionRoute, code, {
+        action: { cardsPerPlayer: 3, type: "setSettings" },
+        seatId: host.seat,
+        token: host.token,
+      })
+    ).status,
+    200,
+  );
+
+  const fresh = await poll(code, host.seat, host.token, first.body.etag ?? "");
+
+  assert.equal(fresh.body.view?.settings.cardsPerPlayer, 3);
+  assert.equal(
+    (
+      await post(actionRoute, code, {
+        action: { cardsPerPlayer: 7, type: "setSettings" },
+        seatId: host.seat,
+        token: host.token,
+      })
+    ).status,
+    200,
+  );
+
+  // wrong token / unknown room are final answers, everything else is retried by the browser
+  const wrongToken = await poll(code, host.seat, "wrong-token", "");
+
+  assert.equal(wrongToken.status, 404);
+  assert.equal(wrongToken.body.fatal, true);
+
+  const nowhere = await poll("ZZZZ", host.seat, host.token, "");
+
+  assert.equal(nowhere.status, 404);
+  assert.equal(nowhere.body.fatal, true);
+
+  // a friend joins by code (lower case is fine)
   const joined = await post(joinRoute, code.toLowerCase(), { name: "Paul" });
 
   assert.equal(joined.status, 200);
 
   const guest = { seat: String(joined.body.seatId), token: String(joined.body.token) };
-  const guestStream = await openStream(code, guest.seat, guest.token);
+  const hostSees = browser(code, host.seat, host.token);
+  const guestSees = browser(code, guest.seat, guest.token);
 
-  await waitFor(() => hostStream.latest()?.seats.length === 2, "host sees Paul arrive");
-  await waitFor(() => guestStream.latest()?.seats.length === 2, "Paul sees the table");
-  assert.equal(guestStream.latest()?.you, guest.seat);
-  assert.equal(guestStream.latest()?.hostId, host.seat);
+  await hostSees.refresh();
+  await guestSees.refresh();
+  assert.equal(hostSees.view?.seats.length, 2, "host sees Paul arrive");
+  assert.equal(guestSees.view?.you, guest.seat);
+  assert.equal(guestSees.view?.hostId, host.seat);
 
   // bad inputs
-  assert.equal((await post(joinRoute, "ZZZZ", { name: "x" })).status, 400);
+  assert.equal((await post(joinRoute, "ZZZZ", { name: "x" })).status, 404);
+  assert.equal((await post(joinRoute, "", { name: "x" })).status, 400);
   assert.equal((await post(actionRoute, code, "not json")).status, 400);
 
   // host-only controls are enforced over HTTP
@@ -169,76 +185,216 @@ async function main() {
     token: guest.token,
   });
 
-  assert.equal(forged.status, 400, "a token only works for its own seat");
+  assert.equal(forged.status, 403, "a token only works for its own seat");
 
-  const hostBot = await post(actionRoute, code, {
-    action: { type: "addBot" },
-    seatId: host.seat,
-    token: host.token,
-  });
+  for (let i = 0; i < 2; i++) {
+    assert.equal(
+      (
+        await post(actionRoute, code, {
+          action: { type: "addBot" },
+          seatId: host.seat,
+          token: host.token,
+        })
+      ).status,
+      200,
+    );
+  }
 
-  assert.equal(hostBot.status, 200);
-  await waitFor(() => guestStream.latest()?.seats.length === 3, "Paul sees the bot");
+  assert.equal(
+    (
+      await post(actionRoute, code, {
+        action: { endMode: "ranking", type: "setSettings" },
+        seatId: host.seat,
+        token: host.token,
+      })
+    ).status,
+    200,
+  );
 
-  // host launches; each player gets only their own cards
-  const started = await post(actionRoute, code, {
-    action: { type: "start" },
-    seatId: host.seat,
-    token: host.token,
-  });
+  await guestSees.refresh();
+  assert.equal(guestSees.view?.seats.length, 4, "Paul sees the bots");
 
-  assert.equal(started.status, 200);
-  await waitFor(() => guestStream.latest()?.phase === "playing", "Paul sees the game start");
-  await waitFor(() => hostStream.latest()?.phase === "playing", "host sees the game start");
+  // the host launches; each player gets only their own cards
+  assert.equal(
+    (
+      await post(actionRoute, code, {
+        action: { type: "start" },
+        seatId: host.seat,
+        token: host.token,
+      })
+    ).status,
+    200,
+  );
+  await hostSees.refresh();
+  await guestSees.refresh();
+  assert.equal(guestSees.view?.phase, "playing");
 
-  const hostHand = hostStream.latest()?.game?.hand.map((c) => c.id) ?? [];
-  const guestHand = guestStream.latest()?.game?.hand.map((c) => c.id) ?? [];
+  const hostHand = hostSees.view?.game?.hand.map((c) => c.id) ?? [];
+  const guestHand = guestSees.view?.game?.hand.map((c) => c.id) ?? [];
 
   assert.equal(hostHand.length, 7);
   assert.equal(guestHand.length, 7);
   assert.ok(hostHand.every((id) => !guestHand.includes(id)), "hands are different");
 
-  const guestJson = JSON.stringify(guestStream.latest());
+  const guestJson = JSON.stringify(guestSees.view);
 
   for (const id of hostHand) {
     assert.ok(!guestJson.includes(`"${id}"`), `Paul must not see ${id}`);
   }
 
-  // someone who is not in the game gets a clear fatal message, not a hang
-  const stranger = await openStream(code, "nobody", "wrong");
+  // Paul closes the tab: after a while he shows as offline to the others...
+  const realNow = Date.now;
+  let offset = 0;
 
-  await waitFor(() => stranger.fatal !== null, "stranger is told no");
-  await waitFor(() => stranger.ended(), "stranger's stream ends");
+  Date.now = () => realNow() + offset;
 
-  const missing = await openStream("ZZZZ", "a", "b");
+  try {
+    await hostSees.refresh();
+    assert.equal(hostSees.view?.seats.find((s) => s.id === guest.seat)?.connected, true);
+    offset = 20_000;
+    await hostSees.refresh();
+    assert.equal(
+      hostSees.view?.seats.find((s) => s.id === guest.seat)?.connected,
+      false,
+      "Paul shown offline although nothing else changed",
+    );
 
-  await waitFor(() => missing.fatal !== null, "unknown room is reported");
+    // ...and coming back with the saved token restores the seat and the cards
+    const back = await post(joinRoute, code, { token: guest.token });
 
-  // closing a tab shows that player as offline to the others
-  guestStream.close();
-  await waitFor(
-    () => hostStream.latest()?.seats.find((s) => s.id === guest.seat)?.connected === false,
-    "Paul shown offline",
+    assert.equal(back.status, 200);
+    assert.equal(back.body.seatId, guest.seat);
+
+    const guestAgain = browser(code, guest.seat, guest.token);
+
+    await guestAgain.refresh();
+    assert.deepEqual(
+      guestAgain.view?.game?.hand.map((c) => c.id),
+      guestHand,
+      "same cards after reconnecting",
+    );
+    await hostSees.refresh();
+    assert.equal(hostSees.view?.seats.find((s) => s.id === guest.seat)?.connected, true);
+  } finally {
+    Date.now = realNow;
+  }
+
+  // The two humans play, the bots play when asked: a whole set through HTTP only.
+  let steps = 0;
+
+  while (hostSees.view?.phase !== "finished") {
+    steps += 1;
+    assert.ok(steps < 4000, `${label}: the game should finish`);
+
+    for (const who of [
+      { b: hostSees, creds: host },
+      { b: guestSees, creds: guest },
+    ]) {
+      const view = await who.b.refresh();
+      const game = view?.game;
+
+      if (!game || game.over || game.currentSeatId !== who.creds.seat) {
+        continue;
+      }
+
+      const playable = game.hand.find((card) => game.playableIds.includes(card.id));
+      const result = await post(actionRoute, code, {
+        action: playable
+          ? { cardId: playable.id, suit: playable.rank === "J" ? "hearts" : undefined, type: "play" }
+          : { type: "draw" },
+        seatId: who.creds.seat,
+        token: who.creds.token,
+      });
+
+      assert.equal(result.status, 200, JSON.stringify(result.body));
+    }
+
+    await sleep(1);
+  }
+
+  const done = hostSees.view?.game;
+
+  assert.ok(done?.over);
+  assert.equal(done.standings.length, 4, "everybody is ranked");
+  assert.ok(
+    (done.moves.length ?? 0) <= 40,
+    "only the latest moves are sent, however long the game was",
   );
 
-  // ...and coming back with the saved token restores the seat
-  const back = await post(joinRoute, code, { token: guest.token });
+  // the host leaves, then the last person leaves: the room is gone for good
+  await post(actionRoute, code, {
+    action: { type: "leave" },
+    seatId: host.seat,
+    token: host.token,
+  });
+  await post(actionRoute, code, {
+    action: { type: "leave" },
+    seatId: guest.seat,
+    token: guest.token,
+  });
 
-  assert.equal(back.status, 200);
-  assert.equal(back.body.seatId, guest.seat);
+  const gone = await poll(code, guest.seat, guest.token, "");
 
-  const guestAgain = await openStream(code, guest.seat, guest.token);
+  assert.equal(gone.status, 404);
+  assert.equal(gone.body.fatal, true);
+  assert.equal((await post(joinRoute, code, { name: "Late" })).status, 404);
 
-  await waitFor(() => guestAgain.latest()?.game?.hand.length === 7, "Paul is back with his hand");
-  assert.deepEqual(
-    guestAgain.latest()?.game?.hand.map((c) => c.id),
-    guestHand,
-    "same cards after reconnecting",
-  );
+  // two rooms never mix
+  const other = await post(createRoute as never, "", { name: "Someone" });
 
-  hostStream.close();
-  guestAgain.close();
-  resetRooms();
+  assert.notEqual(other.body.code, code);
+}
+
+async function main() {
+  // --- in memory ---------------------------------------------------------------------------
+  useStore(createMemoryStore());
+  await scenario("memory");
+
+  // --- Redis (stand-in) ---------------------------------------------------------------------
+  const redis: FakeUpstash = await startFakeUpstash();
+
+  useStore(createRedisStore({ token: redis.token, url: redis.url }));
+  await scenario("redis");
+  assert.ok(redis.commands() > 50, "the scenario really went through the Redis stand-in");
+
+  // health: reports where games are kept
+  const health = await (await healthRoute()).json();
+
+  assert.equal(health.ok, true);
+  assert.equal(health.storage, "redis");
+  assert.equal(health.warning, null);
+
+  // a storage hiccup is a retryable 503, never "game no longer exists"
+  const created = await post(createRoute as never, "", { name: "Amina" });
+  const code = String(created.body.code);
+  const seat = String(created.body.seatId);
+  const token = String(created.body.token);
+
+  redis.failNext(3);
+
+  const hiccup = await poll(code, seat, token, "");
+
+  assert.equal(hiccup.status, 503);
+  assert.notEqual(hiccup.body.fatal, true, "a failing database is not a missing game");
+
+  const after = await poll(code, seat, token, "");
+
+  assert.equal(after.status, 200, "and the room is still there afterwards");
+  assert.equal(after.body.view?.phase, "lobby");
+
+  redis.failNext(3);
+  assert.equal((await (await healthRoute()).json()).ok, false, "health notices a broken database");
+
+  // wrong credentials for the database are reported, not hidden
+  useStore(createRedisStore({ token: "wrong", url: redis.url }));
+
+  const denied = await poll(code, seat, token, "");
+
+  assert.equal(denied.status, 503);
+  assert.notEqual(denied.body.fatal, true);
+
+  await redis.close();
+  useStore(null);
   console.log("All route checks passed.");
 }
 

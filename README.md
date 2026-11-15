@@ -62,9 +62,12 @@ and starts it straight away.
     you have a card you could play. Taking a card ends your turn.
 - When the **bank is finished**, all the cards under the centre card are
   **mixed** and become the new bank. The centre card stays.
-- Down to one card? Press **CHECK!** Everyone else sees your seat **blink**
-  and a banner announces it.
+- Down to one card? You are **on check**. Nothing to press: the table
+  announces it by itself. Everyone else sees your seat **blink** and a banner.
+  Take a card and the check goes away.
 - Play your last card: **GAMES!**
+- The game counts **rounds** quietly in the background: a round is over when
+  everybody still playing has had their turn since it began.
 
 ### Special cards
 
@@ -87,7 +90,11 @@ and starts it straight away.
 
 ### How a set ends (the host chooses)
 
-- **Stop:** the set ends as soon as one player plays their last card.
+- **Stop:** when a player plays their last card, the others still play the rest
+  of that round, then the set ends and that player wins. If **two or more**
+  players finish in the same round it is a tie: each of them takes **2 cards**
+  from the bank and they play it off between themselves (the others wait). The
+  first one to finish while the round completes wins.
 - **Keep going:** the others carry on until everybody is ranked: 1st, 2nd, 3rd…
   A finished player watches. Everyone sees the ranking at the end.
 - **Eliminate the loser** (only with *Keep going*): after each set the last
@@ -115,8 +122,12 @@ same link in the same browser.
 | File | What it does |
 | --- | --- |
 | `src/cheque-games/engine.ts` | All the rules, special cards included. No React, easy to test. |
-| `src/server/rooms.ts` | Rooms, codes, host controls, bots. Each player only ever receives their own cards. |
-| `src/app/api/rooms/...` | The network side: create, join, actions and the live update stream. |
+| `src/server/rooms.ts` | The rules of a room as plain functions: codes, host controls, bots. Each player only ever receives their own cards. |
+| `src/server/store.ts` | Where rooms are kept: Upstash Redis when configured, memory otherwise. |
+| `src/server/service.ts` | Load a room, run the rules, save it again (with safe retries). |
+| `src/app/api/rooms/...` | The network side: create, join, actions and the state (asked for about every second). |
+| `src/app/api/health/route.ts` | Open `/api/health` to see how games are being stored. |
+| `src/multiplayer/useRoom.ts` | How the browser follows a game: it asks, and repeats if a request fails. |
 | `src/multiplayer/Table.tsx` | The table: seats, bank, pile, your hand. |
 | `src/multiplayer/CentrePile.tsx` | The untidy centre pile and card flights onto it. |
 | `src/multiplayer/FlightLayer.tsx` | Cards flying from the bank, and the mixing. |
@@ -146,10 +157,12 @@ and they are used automatically.
 npm test
 ```
 
-Runs the rules (every special card, both ways of ending, and 900 simulated
-games with jokers), the room server (host settings, privacy of hands and of
-drawn cards, kicking, leaving, reconnecting, ranking, elimination and the final,
-full games with people and bots) and the network layer.
+Runs the rules (every special card, rounds and ties, automatic check, and 900
+simulated games with jokers), the room server (host settings, privacy of hands
+and of drawn cards, kicking, leaving, reconnecting, ranking, elimination and the
+final, full games with people and bots), the network layer, and a stress test
+with many players joining and acting at the same moment against a stand-in for
+Redis.
 
 ## Rules I had to decide (change them in `engine.ts`)
 
@@ -168,13 +181,52 @@ full games with people and bots) and the network layer.
 - If the bank cannot give all the cards owed, you take what there is.
 - If nobody can move any more (empty bank, no playable cards), the set ends and
   the player with the fewest cards ranks highest.
-- Forgetting to say check has no penalty yet.
+- Check is announced automatically, so there is nothing to forget.
+- Tie play-off: only the players who finished in the same round play on, and
+  each takes 2 cards. If those finish again in the same round, it repeats.
+  Ranking mode ("Keep going") is not affected by any of this.
 - With two players, an Ace makes you play again.
 - Jokers are on by default; the host can switch them off.
 
+## Putting it online (Vercel)
+
+On Vercel, every request can be answered by a different short-lived server, so
+a game kept in one server's memory "no longer exists" a moment later, and bots
+that rely on timers stop. This version keeps every game in a small shared
+database instead, and no server needs to remember anything. You have to give it
+that database once:
+
+1. In your Vercel project open **Storage** (or **Marketplace**) and add
+   **Upstash Redis** (the free plan is enough). Connect it to the project.
+   This adds environment variables named `KV_REST_API_URL` and
+   `KV_REST_API_TOKEN` (or `UPSTASH_REDIS_REST_URL` and
+   `UPSTASH_REDIS_REST_TOKEN`). Either pair works.
+2. **Redeploy** the project (environment variables only apply to new
+   deployments).
+3. Open `https://your-site/api/health`. It must say `"storage":"redis"` and
+   `"ok":true`. If it says `"memory"`, the variables are not set on this
+   deployment. The home screen also shows a yellow warning in that case.
+
+How it behaves:
+
+- The browser asks the server for the game about every second (every 5 s in a
+  background tab). There is no open connection that a host could cut. If a
+  request fails the browser simply asks again; the "game no longer exists"
+  message only appears if the game is really gone (everybody left, or nobody
+  touched it for 24 hours).
+- Bots take their turn when somebody asks about the game, so with at least one
+  human connected they play normally. If everybody closes the page the game
+  waits where it is.
+- Two people acting at the same instant cannot overwrite each other: each save
+  checks that nobody saved first, and otherwise the move is applied again to
+  the newer game.
+- On the free Upstash plan the number of commands is limited. Asking about every
+  second costs roughly 3,600 commands per hour per player, so an evening of
+  play with a few friends is well inside a normal month. Leave tabs closed
+  when you are not playing.
+
 ## Good to know
 
-- Games live in the server's memory. Restarting the server clears them, and an
-  empty game is removed after 30 minutes.
-- Run one server only (not several copies), because the games are kept in that
-  one process.
+- On your own computer with no database set, games live in memory (fine for
+  one `npm run dev` / `npm start` process; restarting clears them).
+- Games are deleted from the database 24 hours after the last move.

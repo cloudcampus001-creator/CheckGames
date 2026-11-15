@@ -21,7 +21,9 @@ import {
   type Result,
   type StandardCard,
   type Suit,
+  TIE_CARDS,
   topCard,
+  trimEvents,
   type Card,
 } from "./engine.ts";
 
@@ -60,8 +62,13 @@ function make(options: {
   pending?: number;
   demand?: Suit | null;
   finished?: string[];
+  benched?: string[];
+  roundStart?: number;
 }): GameState {
   return {
+    benched: options.benched ?? [],
+    eventBase: 0,
+    roundStart: options.roundStart ?? options.current ?? 0,
     bank: options.bank ?? [
       s("3", "clubs"),
       s("4", "clubs"),
@@ -489,7 +496,9 @@ assert.ok(isSpecial(joker("red")) && !isSpecial(s("9", "hearts")));
   const won = ok(playCard(last, "p0", "J-hearts", { suit: "spades" }));
 
   assert.equal(won.winner, "p0");
-  assert.ok(won.over);
+  assert.equal(won.over, false, "the other player still plays the round");
+  assert.deepEqual(won.finished, ["p0"]);
+  assert.ok(ok(drawCard(won, "p1")).over);
 }
 
 // === the bank is always open; the pile is mixed into a new bank ==========================
@@ -552,16 +561,169 @@ assert.ok(isSpecial(joker("red")) && !isSpecial(s("9", "hearts")));
 
 // === how a set ends ===================================================================
 {
-  // "first": the game stops as soon as one player is out
-  const first = make({ hands: [[s("9", "hearts")], [s("K", "hearts")], [s("Q", "hearts")]] });
-  const done = ok(playCard(first, "p0", "9-hearts"));
+  // "first": the others finish the round, then the one who went out wins
+  const first = make({
+    hands: [[s("9", "hearts")], [s("K", "hearts"), s("3", "diamonds")], [s("Q", "hearts"), s("4", "diamonds")]],
+  });
+  const out = ok(playCard(first, "p0", "9-hearts"));
 
-  assert.ok(done.over);
+  assert.equal(out.over, false, "p1 and p2 still have their turn");
+  assert.equal(out.winner, "p0");
+  assert.deepEqual(out.finished, ["p0"]);
+  assert.equal(out.current, 1);
+  refused(callCheck(out, "p0"));
+
+  const afterP1 = ok(playCard(out, "p1", "K-hearts"));
+
+  assert.equal(afterP1.over, false);
+  assert.equal(afterP1.current, 2);
+
+  const done = ok(playCard(afterP1, "p2", "Q-hearts"));
+
+  assert.ok(done.over, "everybody has played since p0 went out");
   assert.equal(done.winner, "p0");
   assert.deepEqual(done.finished, ["p0"]);
-  refused(playCard(done, "p1", "K-hearts"), /over/);
+  refused(playCard(done, "p1", "3-diamonds"), /over/);
   refused(drawCard(done, "p1"), /over/);
   refused(callCheck(done, "p1"), /over/);
+
+  // the round is counted from whoever began it: p1 begins, p2 goes out, p0 and p1 still play
+  const late = make({
+    centre: s("9", "hearts"),
+    current: 1,
+    hands: [[s("5", "hearts"), s("6", "diamonds")], [s("K", "hearts"), s("3", "diamonds")], [s("9", "hearts")]],
+  });
+  const l1 = ok(playCard(late, "p1", "K-hearts"));
+
+  assert.equal(l1.current, 2);
+
+  const l2 = ok(playCard(l1, "p2", "9-hearts"));
+
+  assert.equal(l2.over, false, "p0 has not played since p2 went out");
+  assert.equal(l2.current, 0);
+
+  const l3 = ok(playCard(l2, "p0", "5-hearts"));
+
+  assert.ok(l3.over, "p0 was the last to play in the round");
+  assert.equal(l3.winner, "p2");
+
+  // two players: one goes out, the other goes out too -> a tie, 2 cards each, and they play on
+  const pair = make({ hands: [[s("9", "hearts")], [s("K", "hearts")]] });
+  const pairOne = ok(playCard(pair, "p0", "9-hearts"));
+
+  assert.equal(pairOne.over, false);
+
+  const tied = ok(playCard(pairOne, "p1", "K-hearts"));
+
+  assert.equal(tied.over, false, "a tie does not end the set");
+  assert.deepEqual(tied.finished, [], "the play-off starts from scratch");
+  assert.equal(tied.winner, null);
+  assert.equal(handOf(tied, "p0").length, TIE_CARDS);
+  assert.equal(handOf(tied, "p1").length, TIE_CARDS);
+  assert.equal(tied.bank.length, 6 - 2 * TIE_CARDS);
+  assert.equal(totalCards(tied), totalCards(pair));
+  assert.deepEqual(tied.events.find((e) => e.type === "tie"), {
+    cards: TIE_CARDS,
+    playerIds: ["p0", "p1"],
+    type: "tie",
+  });
+  assert.ok(tied.checked.length === 0, "two cards is not check");
+
+  // three players: two tie, the one who did not go out sits the play-off out
+  const three = make({
+    bank: [s("3", "clubs"), s("4", "clubs"), s("5", "hearts"), s("6", "hearts"), s("9", "hearts"), s("8", "hearts")],
+    hands: [[s("9", "hearts")], [s("K", "hearts")], [s("Q", "hearts"), s("4", "diamonds")]],
+  });
+  const t1 = ok(playCard(three, "p0", "9-hearts"));
+  const t2 = ok(playCard(t1, "p1", "K-hearts"));
+
+  assert.equal(t2.over, false);
+  assert.deepEqual(t2.finished, ["p0", "p1"]);
+
+  const t3 = ok(playCard(t2, "p2", "Q-hearts"));
+
+  assert.equal(t3.over, false);
+  assert.deepEqual(t3.benched, ["p2"]);
+  assert.deepEqual(ids(handOf(t3, "p0")), ["8-hearts", "9-hearts"]);
+  assert.deepEqual(ids(handOf(t3, "p1")), ["6-hearts", "5-hearts"]);
+  assert.equal(t3.current, 0, "the play-off starts with the first tied player in turn order");
+  assert.deepEqual(ids(legalPlays(t3, "p2")), [], "p2 sits out");
+  refused(playCard(t3, "p2", "4-diamonds"));
+  assert.equal(canDraw(t3, "p2"), false);
+
+  // p0 plays, p1 plays: p2 is skipped each time
+  const t4 = ok(playCard(t3, "p0", "8-hearts"));
+
+  assert.equal(t4.current, 1);
+  assert.deepEqual(t4.checked, ["p0"], "one card left: on check");
+
+  const t5 = ok(playCard(t4, "p1", "6-hearts"));
+
+  assert.equal(t5.current, 0, "p2 is skipped");
+  assert.deepEqual([...t5.checked].sort(), ["p0", "p1"]);
+
+  // p0 goes out; p1 still plays the round and draws, so p0 wins the play-off
+  const t6 = ok(playCard(t5, "p0", "9-hearts"));
+
+  assert.equal(t6.over, false);
+  assert.equal(t6.current, 1);
+
+  const t7 = ok(drawCard(t6, "p1"));
+
+  assert.ok(t7.over);
+  assert.equal(t7.winner, "p0");
+  assert.equal(totalCards(t7), totalCards(three));
+
+  // an ace can end a round: p0 plays an ace, p1 is stopped, so the round (begun by p0) is over
+  const ace = make({
+    centre: s("9", "hearts"),
+    hands: [[s("A", "hearts"), s("3", "diamonds")], [s("K", "hearts"), s("4", "diamonds")]],
+  });
+  const aced = ok(playCard(ace, "p0", "A-hearts"));
+
+  assert.equal(aced.current, 0, "p1 is stopped, so p0 plays again");
+  assert.equal(aced.roundStart, 0, "and a new round begins with p0");
+
+  // an ace played by the player who went out does not skip the round's end
+  const aceLast = make({
+    centre: s("9", "hearts"),
+    hands: [[s("A", "hearts")], [s("K", "hearts"), s("4", "diamonds")], [s("Q", "hearts"), s("4", "clubs")]],
+  });
+  const aceLastOut = ok(playCard(aceLast, "p0", "A-hearts"));
+
+  assert.equal(aceLastOut.current, 2, "p1 is stopped");
+  assert.equal(aceLastOut.over, false, "p2 still plays");
+  assert.ok(ok(drawCard(aceLastOut, "p2")).over, "then the round is over");
+
+  // check is announced automatically, and goes away when you take cards
+  const chk = make({
+    centre: s("9", "hearts"),
+    hands: [[s("5", "hearts"), s("2", "spades")], [s("K", "hearts"), s("4", "diamonds")]],
+  });
+  const c1 = ok(playCard(chk, "p0", "5-hearts"));
+
+  assert.deepEqual(c1.checked, ["p0"]);
+  assert.deepEqual(c1.events.filter((e) => e.type === "check"), [{ playerId: "p0", type: "check" }]);
+
+  const c2 = ok(drawCard(c1, "p1"));
+  const c3 = ok(drawCard(c2, "p0"));
+
+  assert.deepEqual(c3.checked, [], "p0 took a card: no longer on check");
+
+  const c4 = ok(playCard({ ...c3, current: 0 }, "p0", "2-spades"));
+
+  assert.deepEqual(c4.checked, ["p0"], "down to one card again: on check again");
+
+  // long games keep a short event list, and numbering carries on
+  const longGame = {
+    ...chk,
+    events: Array.from({ length: 300 }, () => ({ playerId: "p0", type: "check" }) as const),
+  };
+  const trimmed = trimEvents(longGame);
+
+  assert.ok(trimmed.events.length <= 120);
+  assert.equal((trimmed.eventBase ?? 0) + trimmed.events.length, 300);
+  assert.equal(trimEvents(chk), chk, "a short list is left alone");
 
   // "ranking": the others carry on, and everybody is ranked
   const ranking = make({
@@ -634,6 +796,7 @@ const seen = {
   penalties: 0,
   rankings: 0,
   skips: 0,
+  ties: 0,
   twosUnder: 0,
 };
 let longest = 0;
@@ -671,6 +834,14 @@ for (let seed = 1; seed <= 900; seed++) {
       `a request needs a jack on top, seed ${seed}`,
     );
     assert.ok(state.pending === 0 || state.demand === null);
+    assert.ok(
+      state.over || !(state.benched ?? []).includes(state.players[state.current].id),
+      `a benched player never has the turn, seed ${seed}`,
+    );
+    assert.ok(
+      state.over || !state.finished.includes(state.players[state.current].id),
+      `a player who is out never has the turn, seed ${seed}`,
+    );
 
     for (const id of state.finished) {
       if (!state.over || mode === "first") {
@@ -692,6 +863,7 @@ for (let seed = 1; seed <= 900; seed++) {
 
   for (const event of state.events) {
     if (event.type === "skip") seen.skips++;
+    if (event.type === "tie") seen.ties++;
     if (event.type === "penalty" && event.count > 0) seen.penalties++;
     if (event.type === "play" && event.demand) seen.jackRequests++;
     if (event.type === "play" && event.placement === "under") seen.twosUnder++;
@@ -701,7 +873,7 @@ for (let seed = 1; seed <= 900; seed++) {
   longest = Math.max(longest, turns);
 }
 
-assert.ok(seen.skips > 50 && seen.penalties > 50 && seen.jackRequests > 50 && seen.twosUnder > 50 && seen.attacks > 50, `the simulations used every special card: ${JSON.stringify(seen)}`);
+assert.ok(seen.skips > 50 && seen.penalties > 50 && seen.jackRequests > 50 && seen.twosUnder > 50 && seen.attacks > 50 && seen.ties > 3, `the simulations used every special card: ${JSON.stringify(seen)}`);
 
 console.log(
   `All checks passed. 900 simulated games finished (longest: ${longest} turns). Specials seen: ${JSON.stringify(seen)}`,

@@ -1,4 +1,4 @@
-import { joinRoom } from "@/server/rooms";
+import { joinRoom } from "@/server/service";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -16,7 +16,16 @@ export async function POST(request: Request, { params }: Context) {
     // no body: defaults apply
   }
 
-  const result = joinRoom(code, body.name, body.token);
+  try {
+    const result = await joinRoom(code, body.name, body.token);
 
-  return Response.json(result, { status: result.ok ? 200 : 400 });
+    return Response.json(result, { status: result.ok ? 200 : result.status });
+  } catch (error) {
+    console.error("join room failed", error);
+
+    return Response.json(
+      { error: "The game server is busy. Please try again.", ok: false },
+      { status: 503 },
+    );
+  }
 }

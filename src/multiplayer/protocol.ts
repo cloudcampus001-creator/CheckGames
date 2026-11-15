@@ -21,7 +21,9 @@ export type RoomSettings = {
   /** Play with the red and black joker (54 cards). */
   jokers: boolean;
   /**
-   * "first": the set stops as soon as one player games.
+   * "first": when one player games, the others still play out the round. If
+   *          two or more game in the same round, each takes 2 cards and they
+   *          play on.
    * "ranking": the others carry on until everyone is ranked (1st, 2nd, ...).
    */
   endMode: EndMode;
@@ -49,6 +51,8 @@ export type SeatView = {
   rank: number | null;
   /** Knocked out of the tournament until the next final is over. */
   eliminated: boolean;
+  /** Lost a tie: watches while the tied players play on. */
+  sittingOut: boolean;
 };
 
 /** How many cards of the pile (newest on top) every player gets to see. */
@@ -85,8 +89,11 @@ export type MoveView = { seq: number } & (
   | { type: "penalty"; seatId: string; count: number }
   /** The pile under the centre card was mixed and became the new bank. */
   | { type: "reshuffle"; count: number }
+  /** The seat is down to one card (announced automatically). */
   | { type: "check"; seatId: string }
   | { type: "games"; seatId: string; rank: number }
+  /** Several seats finished in the same round: each took `cards` and plays on. */
+  | { type: "tie"; seatIds: string[]; cards: number }
 );
 
 export type Standing = { seatId: string; name: string; rank: number };
@@ -118,7 +125,6 @@ export type GameView = {
   playableIds: string[];
   /** The bank is open to you: your turn, and there is something to take. */
   canDraw: boolean;
-  canCheck: boolean;
   /** Recent happenings in plain words, newest last. */
   log: string[];
 };

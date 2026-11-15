@@ -1,10 +1,15 @@
 /**
- * In-memory rooms for multiplayer cheque-games.
+ * The rules of a room, as plain functions on plain data.
+ *
+ * A room is a JSON-friendly object, so it can be saved in a shared store
+ * (see store.ts) after every move and loaded again by whichever server
+ * instance gets the next request. Nothing here keeps anything in memory
+ * between calls: no timers, no open connections. service.ts does the loading,
+ * saving and retrying.
  *
  * The server owns the game. Browsers send actions ("play this card") and
  * receive a personal view of the room, so nobody ever receives another
- * player's hand. Rooms live in this Node process only: restarting the server
- * clears them.
+ * player's hand.
  */
 import {
   botTurn,
@@ -21,6 +26,7 @@ import {
   type Suit,
   SUITS,
   topCard,
+  trimEvents,
 } from "../cheque-games/engine";
 import {
   type GameView,
@@ -37,25 +43,28 @@ import {
   type TournamentView,
 } from "../multiplayer/protocol";
 
-type Seat = {
+export type Seat = {
   id: string;
   name: string;
   kind: "human" | "bot";
   /** Secret that proves a browser owns this seat. Bots have none. */
   token: string | null;
-  /** Open event streams (a player can have several tabs). */
-  connections: number;
+  /**
+   * When this player's browser last asked for the state. Browsers ask every
+   * second or so, so someone who has not asked for a few seconds has left.
+   */
+  polledAt: number;
 };
 
-type Subscriber = {
-  seatId: string;
-  token: string;
-  send: (view: RoomView) => void;
-  close: (reason: string) => void;
-};
+/** A browser counts as connected for this long after its last request. */
+const POLL_FRESH_MS = 8000;
+/** Presence is only saved when it is at least this old (saves writes). */
+const PRESENCE_WRITE_MS = 4000;
+
+const isOnline = (seat: Seat, now: number) => now - seat.polledAt < POLL_FRESH_MS;
 
 /** Sets played in a row, with who is out and who won the final. */
-type Tournament = {
+export type Tournament = {
   /** 1 for the first set. */
   set: number;
   /** Seats knocked out until the next final is over. */
@@ -63,7 +72,7 @@ type Tournament = {
   championId: string | null;
 };
 
-type Room = {
+export type Room = {
   code: string;
   hostId: string;
   phase: Phase;
@@ -74,10 +83,12 @@ type Room = {
   gameCount: number;
   game: GameState | null;
   version: number;
-  subscribers: Set<Subscriber>;
-  botTimer: ReturnType<typeof setTimeout> | null;
+  /** When the next bot may move, or null when no bot is up. */
+  botDueAt: number | null;
   botCounter: number;
   lastActive: number;
+  /** Set when the last human left: the service deletes the room. */
+  closed?: boolean;
 };
 
 type Config = { botDelayMin: number; botDelayMax: number };
@@ -85,23 +96,10 @@ type Config = { botDelayMin: number; botDelayMax: number };
 export type Failure = { ok: false; error: string };
 export type Done = { ok: true };
 
-// Next.js can load this file more than once (hot reload, separate routes), so
-// the rooms live on globalThis to stay one shared set.
-const store = globalThis as typeof globalThis & {
-  __chequeRooms?: Map<string, Room>;
-  __chequeConfig?: Config;
-  __chequeSweeper?: ReturnType<typeof setInterval>;
-};
-
-const rooms = (store.__chequeRooms ??= new Map<string, Room>());
-const config = (store.__chequeConfig ??= {
-  botDelayMax: 1300,
-  botDelayMin: 700,
-});
+const config: Config = { botDelayMax: 1300, botDelayMin: 700 };
 
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const CODE_LENGTH = 4;
-const IDLE_ROOM_MS = 30 * 60 * 1000;
 const NAME_MAX = 16;
 const DEFAULT_CARDS = 7;
 
@@ -111,53 +109,21 @@ export function configureRooms(next: Partial<Config>) {
   Object.assign(config, next);
 }
 
-/** For tests: forget every room. */
-export function resetRooms() {
-  for (const room of [...rooms.values()]) {
-    destroyRoom(room);
-  }
-}
-
-/** For tests: look inside a room (including hands). Never used by the routes. */
-export function peekRoom(code: string) {
-  return rooms.get(normalizeCode(code));
-}
-
-if (!store.__chequeSweeper) {
-  store.__chequeSweeper = setInterval(sweep, 5 * 60 * 1000);
-  store.__chequeSweeper.unref?.();
-}
-
-function sweep() {
-  const now = Date.now();
-
-  for (const room of [...rooms.values()]) {
-    const online = room.seats.reduce((sum, seat) => sum + seat.connections, 0);
-
-    if (online === 0 && now - room.lastActive > IDLE_ROOM_MS) {
-      destroyRoom(room);
-    }
-  }
-}
-
-function normalizeCode(code: unknown) {
+export function normalizeCode(code: unknown) {
   return String(code ?? "")
     .trim()
     .toUpperCase();
 }
 
-function makeCode() {
-  for (;;) {
-    let code = "";
+/** A random room code. The store makes sure it is not taken. */
+export function makeCode() {
+  let code = "";
 
-    for (let i = 0; i < CODE_LENGTH; i++) {
-      code += CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)];
-    }
-
-    if (!rooms.has(code)) {
-      return code;
-    }
+  for (let i = 0; i < CODE_LENGTH; i++) {
+    code += CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)];
   }
+
+  return code;
 }
 
 const newId = () => crypto.randomUUID().slice(0, 8);
@@ -298,6 +264,11 @@ function describeEvent(room: Room, event: GameEvent): string | null {
       return `${nameOf(event.playerId)} says CHECK!`;
     case "games":
       return `${nameOf(event.playerId)} says GAMES! (${ordinal(event.rank)})`;
+    case "tie": {
+      const names = event.playerIds.map(nameOf).join(" and ");
+
+      return `${names} finished in the same round! Each takes ${event.cards} cards and they play on.`;
+    }
     case "stalemate":
       return "Nobody can move any more. The set ends.";
   }
@@ -333,6 +304,8 @@ function toMove(event: GameEvent, seq: number, viewerId: string): MoveView | nul
       return { seatId: event.playerId, seq, type: "check" };
     case "games":
       return { rank: event.rank, seatId: event.playerId, seq, type: "games" };
+    case "tie":
+      return { cards: event.cards, seatIds: event.playerIds, seq, type: "tie" };
     default:
       return null;
   }
@@ -364,7 +337,7 @@ function tournamentView(room: Room): TournamentView {
   };
 }
 
-function viewFor(room: Room, seatId: string): RoomView {
+export function viewFor(room: Room, seatId: string, now: number): RoomView {
   const game = room.game;
   const showGame = game !== null && room.phase !== "lobby";
 
@@ -376,7 +349,7 @@ function viewFor(room: Room, seatId: string): RoomView {
 
     return {
       checked: showGame ? game.checked.includes(seat.id) : false,
-      connected: seat.kind === "bot" || seat.connections > 0,
+      connected: seat.kind === "bot" || seat.id === seatId || isOnline(seat, now),
       eliminated: room.tournament.eliminated.includes(seat.id),
       handCount: player ? player.hand.length : 0,
       id: seat.id,
@@ -389,6 +362,7 @@ function viewFor(room: Room, seatId: string): RoomView {
       kind: seat.kind,
       name: seat.name,
       rank: place === -1 ? null : place + 1,
+      sittingOut: showGame ? (game.benched ?? []).includes(seat.id) : false,
     };
   });
 
@@ -398,10 +372,12 @@ function viewFor(room: Room, seatId: string): RoomView {
     const me = game.players.find((candidate) => candidate.id === seatId);
     const currentSeatId = game.players[game.current].id;
     const firstMove = Math.max(0, game.events.length - MOVES_WINDOW);
+    // Old events are trimmed away, but move numbers keep counting up.
+    const base = (game.eventBase ?? 0) + firstMove;
     const moves: MoveView[] = [];
 
     game.events.slice(firstMove).forEach((event, offset) => {
-      const move = toMove(event, firstMove + offset, seatId);
+      const move = toMove(event, base + offset, seatId);
 
       if (move) {
         moves.push(move);
@@ -416,11 +392,6 @@ function viewFor(room: Room, seatId: string): RoomView {
 
     gameView = {
       bankCount: game.bank.length,
-      canCheck:
-        !game.over &&
-        me !== undefined &&
-        me.hand.length === 1 &&
-        !game.checked.includes(seatId),
       // On your turn the bank is open even if you have a card to play.
       canDraw: canDraw(game, seatId),
       centre: topCard(game),
@@ -456,37 +427,26 @@ function viewFor(room: Room, seatId: string): RoomView {
   };
 }
 
-/** Bump the version and push every connected player their own view. */
-function commit(room: Room) {
+/** Something changed: browsers can tell by the new version number. */
+function commit(room: Room, now = Date.now()) {
   room.version += 1;
-  room.lastActive = Date.now();
-
-  for (const sub of [...room.subscribers]) {
-    const seat = authSeat(room, sub.seatId, sub.token);
-
-    if (!seat) {
-      // Kicked, replaced by a bot, or left: end their stream.
-      room.subscribers.delete(sub);
-      sub.close("You are no longer part of this game.");
-      continue;
-    }
-
-    sub.send(viewFor(room, sub.seatId));
-  }
+  room.lastActive = now;
 }
 
+/** The room is finished: the service deletes it from the store. */
 function destroyRoom(room: Room) {
-  if (room.botTimer) {
-    clearTimeout(room.botTimer);
-    room.botTimer = null;
-  }
+  room.closed = true;
+  room.botDueAt = null;
+}
 
-  rooms.delete(room.code);
+/** Add `count` to the room's version when somebody's presence flipped. */
+export function etagOf(room: Room, now: number) {
+  // Who is connected is part of what a browser shows, so it is part of the tag.
+  const online = room.seats
+    .map((seat) => (seat.kind === "bot" || isOnline(seat, now) ? "1" : "0"))
+    .join("");
 
-  for (const sub of [...room.subscribers]) {
-    room.subscribers.delete(sub);
-    sub.close("This game was closed.");
-  }
+  return `${room.version}.${online}`;
 }
 
 // --- bots --------------------------------------------------------------------
@@ -516,13 +476,13 @@ function concludeSet(room: Room, game: GameState) {
   }
 }
 
-function afterGameChange(room: Room) {
+function afterGameChange(room: Room, now = Date.now()) {
   if (room.game?.over && room.phase === "playing") {
     room.phase = "finished";
     concludeSet(room, room.game);
   }
 
-  scheduleBots(room);
+  scheduleBots(room, now);
 }
 
 /** Deal a new set to everybody who has not been eliminated. */
@@ -545,52 +505,95 @@ function startSet(room: Room) {
   afterGameChange(room);
 }
 
-function scheduleBots(room: Room) {
-  if (room.botTimer) {
-    clearTimeout(room.botTimer);
-    room.botTimer = null;
-  }
-
+const currentSeat = (room: Room) => {
   const game = room.game;
 
   if (room.phase !== "playing" || !game || game.over) {
-    return;
+    return undefined;
   }
 
-  const current = room.seats.find(
-    (seat) => seat.id === game.players[game.current].id,
-  );
+  const id = game.players[game.current]?.id;
+
+  return room.seats.find((seat) => seat.id === id);
+};
+
+/** If a bot is up, note when it may move. Nobody sets a timer: see tickBots. */
+function scheduleBots(room: Room, now = Date.now()) {
+  const current = currentSeat(room);
 
   if (!current || current.kind !== "bot") {
+    room.botDueAt = null;
+
     return;
   }
 
-  const delay =
+  room.botDueAt =
+    now +
     config.botDelayMin +
     Math.random() * (config.botDelayMax - config.botDelayMin);
+}
 
-  room.botTimer = setTimeout(() => {
-    room.botTimer = null;
+/**
+ * Let a bot move if it is its turn and its thinking time is over. Bots have no
+ * timer of their own (a serverless function cannot keep one): whoever asks
+ * about the room next gives them their turn. Returns true if the room changed.
+ */
+export function tickBots(room: Room, now: number): boolean {
+  const current = currentSeat(room);
 
-    const live = room.game;
+  if (!current || current.kind !== "bot") {
+    if (room.botDueAt !== null) {
+      room.botDueAt = null;
 
-    if (!rooms.has(room.code) || room.phase !== "playing" || !live || live.over) {
-      return;
+      return true;
     }
 
-    const seat = room.seats.find(
-      (candidate) => candidate.id === live.players[live.current].id,
-    );
+    return false;
+  }
 
-    // The turn may have changed hands (a player was swapped for a bot, say).
-    if (!seat || seat.kind !== "bot") {
-      return;
-    }
+  if (room.botDueAt === null) {
+    scheduleBots(room, now);
 
-    room.game = botTurn(live);
-    afterGameChange(room);
-    commit(room);
-  }, delay);
+    return true;
+  }
+
+  if (now < room.botDueAt || !room.game) {
+    return false;
+  }
+
+  room.game = trimEvents(botTurn(room.game));
+  afterGameChange(room, now);
+  commit(room, now);
+
+  return true;
+}
+
+/**
+ * A browser asked about the room. Notes that this player is here, and says
+ * whether that has to be saved (it is not saved every time, to save writes).
+ */
+export function touchSeat(room: Room, seatId: string, now: number): boolean {
+  const seat = room.seats.find((candidate) => candidate.id === seatId);
+
+  if (!seat) {
+    return false;
+  }
+
+  const stale = now - seat.polledAt;
+
+  if (stale < PRESENCE_WRITE_MS) {
+    return false;
+  }
+
+  seat.polledAt = now;
+  room.lastActive = now;
+
+  // Everyone sees this player come back.
+  if (stale >= POLL_FRESH_MS) {
+    room.version += 1;
+  }
+
+  return true;
 }
 
 function firstHuman(room: Room, except?: string) {
@@ -602,31 +605,31 @@ function firstHuman(room: Room, except?: string) {
 function turnIntoBot(seat: Seat) {
   seat.kind = "bot";
   seat.token = null;
-  seat.connections = 0;
+  seat.polledAt = 0;
   seat.name = `${seat.name.slice(0, NAME_MAX - 6)} (bot)`;
 }
 
 // --- public API --------------------------------------------------------------
 
-export function createRoom(rawName: unknown) {
-  const code = makeCode();
+/** A new room with its host seated. The service saves it. */
+export function newRoom(code: string, rawName: unknown, now: number) {
   const token = newToken();
   const host: Seat = {
-    connections: 0,
     id: newId(),
     kind: "human",
     name: cleanName(rawName, "Host"),
+    polledAt: now,
     token,
   };
 
   const room: Room = {
     botCounter: 0,
-    botTimer: null,
+    botDueAt: null,
     code,
     game: null,
     gameCount: 0,
     hostId: host.id,
-    lastActive: Date.now(),
+    lastActive: now,
     phase: "lobby",
     seats: [host],
     settings: {
@@ -635,28 +638,22 @@ export function createRoom(rawName: unknown) {
       endMode: "first",
       jokers: true,
     },
-    subscribers: new Set(),
     tournament: freshTournament(),
-    version: 0,
+    version: 1,
   };
 
   normalizeSettings(room);
-  rooms.set(code, room);
 
-  return { code, seatId: host.id, token };
+  return { room, seatId: host.id, token };
 }
 
-export function joinRoom(
-  code: unknown,
+/** Take a seat, or get your old one back with the token you saved. */
+export function joinInto(
+  room: Room,
   rawName: unknown,
-  token?: unknown,
-): Failure | { ok: true; code: string; seatId: string; token: string } {
-  const room = rooms.get(normalizeCode(code));
-
-  if (!room) {
-    return fail("No game found with that code. Check it and try again.");
-  }
-
+  token: unknown,
+  now: number,
+): Failure | { ok: true; code: string; seatId: string; token: string; changed: boolean } {
   // Coming back with a saved token gives you your old seat.
   if (typeof token === "string") {
     const existing = room.seats.find(
@@ -665,7 +662,9 @@ export function joinRoom(
     );
 
     if (existing) {
-      return { code: room.code, ok: true, seatId: existing.id, token };
+      const changed = touchSeat(room, existing.id, now);
+
+      return { changed, code: room.code, ok: true, seatId: existing.id, token };
     }
   }
 
@@ -678,79 +677,38 @@ export function joinRoom(
   }
 
   const seat: Seat = {
-    connections: 0,
     id: newId(),
     kind: "human",
     name: uniqueName(room, cleanName(rawName, `Player ${room.seats.length + 1}`)),
+    polledAt: now,
     token: newToken(),
   };
 
   room.seats.push(seat);
   normalizeSettings(room);
-  commit(room);
-
-  return { code: room.code, ok: true, seatId: seat.id, token: seat.token as string };
-}
-
-export function subscribe(
-  code: unknown,
-  seatId: unknown,
-  token: unknown,
-  send: (view: RoomView) => void,
-  close: (reason: string) => void,
-): Failure | { ok: true; unsubscribe: () => void } {
-  const room = rooms.get(normalizeCode(code));
-
-  if (!room) {
-    return fail("This game no longer exists.");
-  }
-
-  const seat = authSeat(room, seatId, token);
-
-  if (!seat) {
-    return fail("You are not part of this game.");
-  }
-
-  const sub: Subscriber = {
-    close,
-    seatId: seat.id,
-    send,
-    token: seat.token as string,
-  };
-
-  seat.connections += 1;
-  room.subscribers.add(sub);
-  // Everyone (including the newcomer) gets a fresh view.
-  commit(room);
+  commit(room, now);
 
   return {
+    changed: true,
+    code: room.code,
     ok: true,
-    unsubscribe: () => {
-      if (!room.subscribers.delete(sub)) {
-        return;
-      }
-
-      seat.connections = Math.max(0, seat.connections - 1);
-
-      if (rooms.has(room.code)) {
-        commit(room);
-      }
-    },
+    seatId: seat.id,
+    token: seat.token as string,
   };
+}
+
+/** Is this seat/token pair really a player in the room? */
+export function checkSeat(room: Room, seatId: unknown, token: unknown) {
+  return authSeat(room, seatId, token) !== undefined;
 }
 
 export function applyAction(
-  code: unknown,
+  room: Room,
   seatId: unknown,
   token: unknown,
   rawAction: unknown,
+  now = Date.now(),
 ): Failure | Done {
-  const room = rooms.get(normalizeCode(code));
-
-  if (!room) {
-    return fail("This game no longer exists.");
-  }
-
   const seat = authSeat(room, seatId, token);
 
   if (!seat) {
@@ -784,10 +742,10 @@ export function applyAction(
 
       room.botCounter += 1;
       room.seats.push({
-        connections: 0,
         id: newId(),
         kind: "bot",
         name: uniqueName(room, `Bot ${room.botCounter}`),
+        polledAt: 0,
         token: null,
       });
       normalizeSettings(room);
@@ -1036,8 +994,8 @@ export function applyAction(
         return fail(result.reason);
       }
 
-      room.game = result.state;
-      afterGameChange(room);
+      room.game = trimEvents(result.state);
+      afterGameChange(room, now);
       commit(room);
 
       return { ok: true };

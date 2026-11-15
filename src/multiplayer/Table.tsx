@@ -36,6 +36,13 @@ const PENALTY_STEP = 0.28;
 // The fan keeps no pile of its own: the server decides what has been played.
 const NO_PLAYED: readonly string[] = [];
 
+/**
+ * The blink is plain CSS, so it keeps going whatever the animation library or
+ * the browser does. The keyframes are defined once in the table.
+ */
+const BLINK = { animation: "cheque-blink 0.9s ease-in-out infinite" } as const;
+const BLINK_CSS = "@keyframes cheque-blink{0%,100%{opacity:.15}50%{opacity:1}}";
+
 const ordinal = (n: number) => {
   const tens = n % 100;
 
@@ -280,6 +287,11 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
         toast(`${nameOf(move.seatId)} says CHECK!`, "check");
       } else if (move.type === "games" && move.seatId !== current.you) {
         toast(`${nameOf(move.seatId)} says GAMES! (${ordinal(move.rank)})`, "info");
+      } else if (move.type === "tie") {
+        toast(
+          `Tie! ${move.seatIds.map(nameOf).join(" and ")} take ${move.cards} cards each`,
+          "info",
+        );
       }
     }
 
@@ -319,12 +331,20 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
   const me = view.seats.find((seat) => seat.id === view.you);
   const iAmPlaying = me?.inGame ?? false;
   const iFinished = iAmPlaying && me?.rank != null && !game.over;
-  const iAmWatching = !iAmPlaying || iFinished;
+  const iAmSittingOut = iAmPlaying && (me?.sittingOut ?? false) && !game.over;
+  const iAmWatching = !iAmPlaying || iFinished || iAmSittingOut;
   const isMyTurn = isMyTurnNow && iAmPlaying;
   const hasPlay = game.playableIds.length > 0;
   const currentName =
     view.seats.find((seat) => seat.id === game.currentSeatId)?.name ?? "Someone";
   const handCards: FanCard[] = game.hand;
+  /** On check: down to their last card (the table announces it by itself). */
+  const onCheck = (seat: (typeof view.seats)[number]) =>
+    !game.over &&
+    seat.inGame &&
+    seat.rank === null &&
+    !seat.sittingOut &&
+    (seat.checked || seat.handCount === 1);
   const hiddenIds = ghosts.flatMap((ghost) => (ghost.revealId ? [ghost.revealId] : []));
   const unplayable = isMyTurn
     ? game.hand.filter((card) => !game.playableIds.includes(card.id)).map((card) => card.id)
@@ -465,6 +485,7 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
 
   return (
     <div className="relative flex min-h-screen flex-col overflow-hidden bg-emerald-950 text-white">
+      <style>{BLINK_CSS}</style>
       <div className="flex items-center justify-between gap-3 px-5 py-3">
         <div className="flex items-center gap-2">
           <span className="rounded-full bg-white/10 px-3 py-1 font-semibold text-sm tracking-widest">
@@ -499,23 +520,17 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
               "relative flex min-w-[92px] flex-col items-center gap-2 rounded-2xl px-3 py-3 transition-colors",
               seat.isCurrent ? "bg-white/15" : "bg-white/5",
               seat.connected ? "" : "opacity-60",
-              !seat.inGame && "opacity-45",
+              (!seat.inGame || seat.sittingOut) && "opacity-45",
             )}
-            data-checked={seat.checked ? "true" : "false"}
+            data-checked={onCheck(seat) ? "true" : "false"}
             data-seat={seat.id}
             key={seat.id}
           >
-            {seat.checked ? (
-              <motion.div
-                animate={{ opacity: [0.15, 1, 0.15] }}
+            {onCheck(seat) ? (
+              <div
                 className="pointer-events-none absolute inset-0 rounded-2xl bg-amber-300/15 ring-2 ring-amber-300"
                 data-check-blink
-                initial={{ opacity: 0.15 }}
-                transition={{
-                  duration: 0.9,
-                  ease: "easeInOut",
-                  repeat: Number.POSITIVE_INFINITY,
-                }}
+                style={BLINK}
               />
             ) : null}
             <span className="max-w-[110px] truncate font-medium text-sm">
@@ -535,20 +550,14 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
                 </span>
               ) : null}
             </div>
-            {seat.checked ? (
-              <motion.span
-                animate={{ opacity: [0.2, 1, 0.2] }}
+            {onCheck(seat) ? (
+              <span
                 className="font-bold text-amber-300 text-xs tracking-wider"
                 data-check-label
-                initial={{ opacity: 0.2 }}
-                transition={{
-                  duration: 0.9,
-                  ease: "easeInOut",
-                  repeat: Number.POSITIVE_INFINITY,
-                }}
+                style={BLINK}
               >
                 CHECK!
-              </motion.span>
+              </span>
             ) : (
               <span className="invisible font-bold text-xs tracking-wider">CHECK!</span>
             )}
@@ -565,6 +574,13 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
             {seat.eliminated ? (
               <span className="font-semibold text-red-200 text-[10px] tracking-wider">
                 OUT
+              </span>
+            ) : seat.sittingOut && !game.over ? (
+              <span
+                className="font-semibold text-[10px] text-white/70 tracking-wider"
+                data-sitting-out
+              >
+                WAITING
               </span>
             ) : null}
             {!seat.connected && seat.kind === "human" ? (
@@ -702,19 +718,13 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
       </div>
 
       <div className="relative z-20">
-        {game.canCheck ? (
+        {me && onCheck(me) ? (
           <div className="absolute inset-x-0 -top-2 z-[200] flex justify-center">
-            <button
-              className="animate-pulse rounded-full bg-amber-300 px-6 py-2 font-bold text-emerald-950 tracking-wider shadow-lg"
-              onClick={() => run({ type: "check" })}
-              type="button"
+            <span
+              className="rounded-full bg-white/15 px-5 py-2 font-bold text-amber-300 tracking-wider"
+              data-my-check
+              style={BLINK}
             >
-              CHECK!
-            </button>
-          </div>
-        ) : me?.checked ? (
-          <div className="absolute inset-x-0 -top-2 z-[200] flex justify-center">
-            <span className="rounded-full bg-white/15 px-5 py-2 font-bold text-amber-300 tracking-wider">
               CHECK!
             </span>
           </div>
@@ -732,16 +742,22 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
               data-watching
             >
               <p className="font-semibold">
-                {iAmPlaying
-                  ? `You finished ${ordinal(me?.rank ?? 1)}`
-                  : me?.eliminated
+                {iAmSittingOut
+                  ? "You are sitting this one out"
+                  : iAmPlaying
+                    ? `You played your last card (${ordinal(me?.rank ?? 1)})`
+                    : me?.eliminated
                     ? "You are eliminated for this set"
                     : "You are watching"}
               </p>
               <p className="text-sm text-white/60">
-                {iAmPlaying
-                  ? "The others are still playing."
-                  : "You come back after the final."}
+                {iAmSittingOut
+                  ? "Players who finished together are playing it off."
+                  : iAmPlaying
+                    ? settings.endMode === "first"
+                      ? "The others finish the round."
+                      : "The others are still playing."
+                    : "You come back after the final."}
               </p>
             </div>
           ) : (

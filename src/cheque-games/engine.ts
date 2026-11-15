@@ -12,7 +12,10 @@
  *    Taking a card ends your turn.
  *  - When the bank is finished, every card under the centre card is mixed
  *    (shuffled) and becomes the new bank.
- *  - Left with one card: call "check". Play your last card: "games".
+ *  - Left with one card you are "on check" (it is announced automatically).
+ *    Play your last card: "games".
+ *  - Turns come in rounds: a round is over once everybody still playing has
+ *    had their turn since it began. The system keeps track of that quietly.
  *
  * Special cards
  *  - A      The next player is stopped; the one after plays.
@@ -28,7 +31,10 @@
  *           card lands on top.
  *
  * How a set ends
- *  - "first":   as soon as one player is out of cards.
+ *  - "first":   when a player goes out, the others still play the rest of
+ *               that round. If only one player went out, they win. If two or
+ *               more went out in the same round it is a tie: each of them takes
+ *               2 cards from the bank and the play-off goes on between them.
  *  - "ranking": the others carry on until only one is left; everyone is
  *               ranked in the order they went out.
  */
@@ -89,6 +95,8 @@ export type GameEvent =
   | { type: "check"; playerId: string }
   /** A player played their last card. `rank` is 1 for the first one out. */
   | { type: "games"; playerId: string; rank: number }
+  /** Several players went out in the same round: each takes `cards` and the play-off goes on. */
+  | { type: "tie"; playerIds: string[]; cards: number }
   /** Nobody can move any more. */
   | { type: "stalemate" };
 
@@ -115,6 +123,12 @@ export type GameState = {
   /** Turns in a row where nobody could take a card. */
   stalled: number;
   events: GameEvent[];
+  /** Players who lost a tie and sit out the play-off. */
+  benched?: string[];
+  /** Seat index of whoever began the current round. */
+  roundStart?: number;
+  /** Events dropped from the front of `events` to keep the state small. */
+  eventBase?: number;
 };
 
 export type Rng = () => number;
@@ -136,7 +150,12 @@ export type PlayOptions = {
   placement?: Placement;
   /** For a jack only: the sign you ask for. */
   suit?: Suit;
+  /** Random source (used if a tie makes the pile be mixed). */
+  rng?: Rng;
 };
+
+/** Cards each player takes when several finish in the same round. */
+export const TIE_CARDS = 2;
 
 export type Result =
   | { ok: true; state: GameState }
@@ -255,11 +274,15 @@ export function createGame({
   }
 
   const [centre] = deck.splice(centreIndex, 1);
+  const start = randomStart ? Math.floor(rng() * players.length) : 0;
 
   return {
     bank: deck,
+    benched: [],
     checked: [],
-    current: randomStart ? Math.floor(rng() * players.length) : 0,
+    current: start,
+    eventBase: 0,
+    roundStart: start,
     demand: null,
     events: [{ type: "start" }],
     finished: [],
@@ -347,7 +370,7 @@ function whyNot(card: Card, context: PlayContext) {
 export function legalPlays(state: GameState, playerId: string): Card[] {
   const player = state.players.find((candidate) => candidate.id === playerId);
 
-  if (!player || state.over || state.finished.includes(playerId)) {
+  if (!player || state.over || outOf(state).includes(playerId)) {
     return [];
   }
 
@@ -370,16 +393,21 @@ function checkTurn(state: GameState, playerId: string): string | null {
   return null;
 }
 
+/** Players who are not playing: gone out, or sitting out a play-off. */
+function outOf(state: Pick<GameState, "finished" | "benched">) {
+  return [...state.finished, ...(state.benched ?? [])];
+}
+
 /** The next player after `from` who is still in the game. */
 function nextActive(
   players: readonly Player[],
-  finished: readonly string[],
+  out: readonly string[],
   from: number,
 ) {
   for (let step = 1; step <= players.length; step++) {
     const index = (from + step) % players.length;
 
-    if (!finished.includes(players[index].id)) {
+    if (!out.includes(players[index].id)) {
       return index;
     }
   }
@@ -388,7 +416,163 @@ function nextActive(
 }
 
 export function activePlayers(state: GameState) {
-  return state.players.filter((player) => !state.finished.includes(player.id));
+  const out = outOf(state);
+
+  return state.players.filter((player) => !out.includes(player.id));
+}
+
+/** Seats you pass going forward from `from` to `to` (a full circle if they are the same seat). */
+function distance(from: number, to: number, count: number) {
+  const steps = (to - from + count) % count;
+
+  return steps === 0 ? count : steps;
+}
+
+/**
+ * Several players went out in the same round. Each takes cards from the bank
+ * and the play-off goes on between them; everybody else sits out.
+ */
+function settleTie(state: GameState, rng: Rng): GameState {
+  const winners = state.players
+    .filter((player) => state.finished.includes(player.id))
+    .map((player) => player.id);
+  const events: GameEvent[] = [
+    ...state.events,
+    { cards: TIE_CARDS, playerIds: winners, type: "tie" },
+  ];
+  let bank = [...state.bank];
+  let pile = [...state.pile];
+  const hands = new Map<string, Card[]>();
+
+  for (const id of winners) {
+    const hand: Card[] = [];
+
+    for (let i = 0; i < TIE_CARDS; i++) {
+      if (bank.length === 0 && pile.length > 1) {
+        ({ bank, pile } = mixPileIntoBank(pile, rng, events));
+      }
+
+      if (bank.length === 0) {
+        break;
+      }
+
+      const card = bank.pop() as Card;
+
+      hand.push(card);
+      events.push({ card, forced: true, playerId: id, type: "draw" });
+
+      if (bank.length === 0 && pile.length > 1) {
+        ({ bank, pile } = mixPileIntoBank(pile, rng, events));
+      }
+    }
+
+    hands.set(id, hand);
+  }
+
+  const players = state.players.map((player) =>
+    hands.has(player.id)
+      ? { ...player, hand: hands.get(player.id) as Card[] }
+      : player,
+  );
+
+  // No cards left to share: the tie stands and the set ends.
+  if (winners.some((id) => (hands.get(id) as Card[]).length === 0)) {
+    return {
+      ...state,
+      bank,
+      events,
+      over: true,
+      pile,
+      players,
+      winner: state.winner ?? winners[0],
+    };
+  }
+
+  const benched = [
+    ...(state.benched ?? []),
+    ...state.players
+      .filter(
+        (player) =>
+          !winners.includes(player.id) &&
+          !(state.benched ?? []).includes(player.id),
+      )
+      .map((player) => player.id),
+  ];
+  let current = state.current;
+
+  for (let step = 0; step < players.length; step++) {
+    const index = (state.current + step) % players.length;
+
+    if (winners.includes(players[index].id)) {
+      current = index;
+      break;
+    }
+  }
+
+  return {
+    ...state,
+    bank,
+    benched,
+    checked: [],
+    current,
+    demand: null,
+    events,
+    finished: [],
+    pending: 0,
+    pile,
+    players,
+    roundStart: current,
+    stalled: 0,
+    winner: null,
+  };
+}
+
+/**
+ * Hand the turn on. This is also where rounds are counted: when the turn
+ * reaches the seat that began the round, the round is complete. In "first"
+ * mode that is when a set that has a player out really ends.
+ */
+function passTurn(
+  state: GameState,
+  from: number,
+  skipNext: boolean,
+  rng: Rng,
+): GameState {
+  const { players } = state;
+  const count = players.length;
+  const out = outOf(state);
+  const events = [...state.events];
+  let current = nextActive(players, out, from);
+  let travelled = distance(from, current, count);
+
+  if (skipNext) {
+    events.push({ playerId: players[current].id, type: "skip" });
+
+    const after = nextActive(players, out, current);
+
+    travelled += distance(current, after, count);
+    current = after;
+  }
+
+  const next: GameState = { ...state, current, events };
+  const start = state.roundStart ?? from;
+
+  if (travelled < distance(from, start, count)) {
+    return next;
+  }
+
+  // The round is complete; a new one begins with whoever is up now.
+  const fresh = { ...next, roundStart: current };
+
+  if (state.mode !== "first" || state.finished.length === 0) {
+    return fresh;
+  }
+
+  if (state.finished.length === 1) {
+    return { ...fresh, over: true, winner: state.winner ?? state.finished[0] };
+  }
+
+  return settleTie(fresh, rng);
 }
 
 export function playCard(
@@ -463,14 +647,19 @@ export function playCard(
   let winner = state.winner;
   let over = false;
 
+  if (hand.length === 1) {
+    // Down to one card: on check. Everybody is told, no button needed.
+    checked.push(playerId);
+    events.push({ playerId, type: "check" });
+  }
+
   if (hand.length === 0) {
     finished = [...finished, playerId];
     winner = winner ?? playerId;
     events.push({ playerId, rank: finished.length, type: "games" });
 
-    if (state.mode === "first") {
-      over = true;
-    } else {
+    // "first": the others still play out the round, so nothing ends yet.
+    if (state.mode === "ranking") {
       const remaining = players.filter((p) => !finished.includes(p.id));
 
       if (remaining.length <= 1) {
@@ -503,29 +692,26 @@ export function playCard(
     };
   }
 
-  let current = nextActive(players, finished, state.current);
-
-  if (skipNext) {
-    events.push({ playerId: players[current].id, type: "skip" });
-    current = nextActive(players, finished, current);
-  }
-
   return {
     ok: true,
-    state: {
-      ...state,
-      checked,
-      current,
-      demand,
-      events,
-      finished,
-      over,
-      pending,
-      pile,
-      players,
-      stalled: 0,
-      winner,
-    },
+    state: passTurn(
+      {
+        ...state,
+        checked,
+        demand,
+        events,
+        finished,
+        over,
+        pending,
+        pile,
+        players,
+        stalled: 0,
+        winner,
+      },
+      state.current,
+      skipNext,
+      options.rng ?? Math.random,
+    ),
   };
 }
 
@@ -642,19 +828,23 @@ export function drawCard(
   const players = state.players.map((candidate) =>
     candidate.id === playerId ? { ...candidate, hand } : candidate,
   );
-  const next: GameState = {
-    ...state,
-    bank,
-    checked: state.checked.filter((id) => id !== playerId),
-    current: nextActive(players, state.finished, state.current),
-    events,
-    pending: 0,
-    pile,
-    players,
-    stalled: taken === 0 ? state.stalled + 1 : 0,
-  };
+  const next = passTurn(
+    {
+      ...state,
+      bank,
+      checked: state.checked.filter((id) => id !== playerId),
+      events,
+      pending: 0,
+      pile,
+      players,
+      stalled: taken === 0 ? state.stalled + 1 : 0,
+    },
+    state.current,
+    false,
+    rng,
+  );
 
-  if (next.stalled >= activePlayers(next).length) {
+  if (!next.over && next.stalled >= activePlayers(next).length) {
     return { ok: true, state: endByStalemate(next) };
   }
 
@@ -669,7 +859,7 @@ export function callCheck(state: GameState, playerId: string): Result {
 
   const player = state.players.find((candidate) => candidate.id === playerId);
 
-  if (!player || state.finished.includes(playerId)) {
+  if (!player || outOf(state).includes(playerId)) {
     return fail("Unknown player.");
   }
 
@@ -749,23 +939,30 @@ export function botTurn(state: GameState, rng: Rng = Math.random): GameState {
     options.placement = rng() < 0.3 ? "under" : "top";
   }
 
-  const played = playCard(state, player.id, card.id, options);
+  const played = playCard(state, player.id, card.id, { ...options, rng });
 
   if (!played.ok) {
     return draw();
   }
 
-  let next = played.state;
-  const after = next.players.find((p) => p.id === player.id);
+  return played.state;
+}
 
-  // Bots never forget to call check.
-  if (after && after.hand.length === 1 && !next.over) {
-    const called = callCheck(next, player.id);
-
-    if (called.ok) {
-      next = called.state;
-    }
+/**
+ * Keep the event list short. Games can run for hundreds of turns and the whole
+ * state is stored after every move, so old events are dropped from the front.
+ * `eventBase` remembers how many were dropped, so moves keep their numbers.
+ */
+export function trimEvents(state: GameState, keep = 80): GameState {
+  if (state.events.length <= keep * 1.5) {
+    return state;
   }
 
-  return next;
+  const drop = state.events.length - keep;
+
+  return {
+    ...state,
+    eventBase: (state.eventBase ?? 0) + drop,
+    events: state.events.slice(drop),
+  };
 }

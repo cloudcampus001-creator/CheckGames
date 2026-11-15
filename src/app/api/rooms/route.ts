@@ -1,4 +1,4 @@
-import { createRoom } from "@/server/rooms";
+import { createRoom } from "@/server/service";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -13,7 +13,16 @@ export async function POST(request: Request) {
     // no body: fall back to the default host name
   }
 
-  const { code, seatId, token } = createRoom(name);
+  try {
+    const result = await createRoom(name);
 
-  return Response.json({ code, ok: true, seatId, token });
+    return Response.json(result, { status: result.ok ? 200 : result.status });
+  } catch (error) {
+    console.error("create room failed", error);
+
+    return Response.json(
+      { error: "The game server is busy. Please try again.", ok: false },
+      { status: 503 },
+    );
+  }
 }

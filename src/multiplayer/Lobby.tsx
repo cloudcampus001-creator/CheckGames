@@ -231,7 +231,7 @@ export function Lobby({ connected, onAction, onLeave, view }: LobbyProps) {
             <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="How a set ends">
               <Choice
                 active={view.settings.endMode === "first"}
-                description="The game stops. They win."
+                description="The others finish the round, then it stops. Several out in one round? Each takes 2 cards and they play it off."
                 disabled={!isHost}
                 label="Stop"
                 onClick={() => run({ endMode: "first", type: "setSettings" })}

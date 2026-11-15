@@ -10,15 +10,23 @@ import {
 } from "../cheque-games/engine";
 import type { RoomView, SeatView } from "../multiplayer/protocol";
 import {
-  applyAction,
+  applyAction as applyToRoom,
   configureRooms,
-  createRoom,
-  joinRoom,
-  peekRoom,
-  resetRooms,
-  subscribe,
+  joinInto,
+  makeCode,
+  newRoom,
+  normalizeCode,
+  type Room,
+  tickBots,
+  viewFor,
 } from "./rooms";
 
+/**
+ * These tests drive the room rules directly, on plain room objects, the way
+ * service.ts does (without a store). Browsers are simulated: after every
+ * change each simulated client gets its fresh personal view, and bots take
+ * their turn when asked (tickBots), exactly as when a poll arrives.
+ */
 configureRooms({ botDelayMax: 2, botDelayMin: 0 });
 
 type Client = {
@@ -29,7 +37,82 @@ type Client = {
   disconnect: () => void;
 };
 
+const tables = new Map<string, { clients: Client[]; room: Room }>();
+
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Every simulated browser at the table gets its view again. */
+function refresh(code: string) {
+  const table = tables.get(code);
+
+  if (!table) {
+    return;
+  }
+
+  for (const client of table.clients) {
+    if (client.closed) {
+      continue;
+    }
+
+    // Gone from the table, or turned into a bot (a player who left mid-game).
+    if (!table.room.seats.some((seat) => seat.id === client.seatId && seat.kind === "human")) {
+      client.closed = "removed";
+      continue;
+    }
+
+    client.view = viewFor(table.room, client.seatId, Date.now());
+  }
+}
+
+const peekRoom = (code: string) => tables.get(normalizeCode(code))?.room;
+const resetRooms = () => tables.clear();
+
+function createRoom(name: string) {
+  const code = makeCode();
+  const { room, seatId, token } = newRoom(code, name, Date.now());
+
+  tables.set(code, { clients: [], room });
+
+  return { code, seatId, token };
+}
+
+function joinRoom(code: string, name: string, token?: string) {
+  const table = tables.get(normalizeCode(code));
+
+  if (!table) {
+    return { error: "No game found with that code.", ok: false as const };
+  }
+
+  const joined = joinInto(table.room, name, token, Date.now());
+
+  refresh(table.room.code);
+
+  return joined;
+}
+
+function applyAction(code: string, seatId: unknown, token: unknown, action: unknown) {
+  const table = tables.get(normalizeCode(code));
+
+  if (!table) {
+    return { error: "This game no longer exists.", ok: false as const };
+  }
+
+  const result = applyToRoom(table.room, seatId, token, action);
+
+  if (table.room.closed) {
+    tables.delete(table.room.code);
+
+    for (const client of table.clients) {
+      client.closed = "room closed";
+    }
+
+    return result;
+  }
+
+  refresh(code);
+
+  return result;
+}
 
 async function waitFor(condition: () => boolean, label: string, ms = 8000) {
   const started = Date.now();
@@ -44,30 +127,28 @@ async function waitFor(condition: () => boolean, label: string, ms = 8000) {
 }
 
 function connect(code: string, seatId: string, token: string): Client {
+  const table = tables.get(code);
+
+  assert.ok(table, "the room exists");
+
   const client: Client = {
     closed: null,
-    disconnect: () => {},
+    disconnect: () => {
+      const seat = table.room.seats.find((s) => s.id === seatId);
+
+      if (seat) {
+        seat.polledAt = 0;
+      }
+
+      refresh(code);
+    },
     seatId,
     token,
     view: null,
   };
-  const result = subscribe(
-    code,
-    seatId,
-    token,
-    (view) => {
-      client.view = view;
-    },
-    (reason) => {
-      client.closed = reason;
-    },
-  );
 
-  assert.ok(result.ok, "subscribe should work");
-
-  if (result.ok) {
-    client.disconnect = result.unsubscribe;
-  }
+  table.clients.push(client);
+  refresh(code);
 
   return client;
 }
@@ -76,15 +157,29 @@ function act(client: Client, code: string, action: object) {
   return applyAction(code, client.seatId, client.token, action);
 }
 
+/** Give any bot whose thinking time is up its turn, then show everybody. */
+function tick(code: string) {
+  const room = peekRoom(code);
+
+  if (room && tickBots(room, Date.now())) {
+    refresh(code);
+  }
+}
+
 /** Humans play the simplest legal move each turn until the game is over. */
 async function playOut(code: string, humans: Client[]) {
   let steps = 0;
 
   for (;;) {
     await waitFor(
-      () =>
-        humans[0].view?.phase === "finished" ||
-        humans.some((h) => h.view?.game?.currentSeatId === h.seatId),
+      () => {
+        tick(code);
+
+        return (
+          humans[0].view?.phase === "finished" ||
+          humans.some((h) => h.view?.game?.currentSeatId === h.seatId)
+        );
+      },
       "a human's turn or the end of the game",
     );
 
@@ -96,10 +191,6 @@ async function playOut(code: string, humans: Client[]) {
     const game = me?.view?.game;
 
     assert.ok(me && game);
-
-    if (game.canCheck) {
-      assert.ok(act(me, code, { type: "check" }).ok, "check should be allowed");
-    }
 
     // The server tells us which cards are legal right now. A jack needs a sign.
     const playable = game.hand.find((card) => game.playableIds.includes(card.id));
@@ -870,7 +961,6 @@ async function main() {
           assert.deepEqual(watcher.view?.game?.hand, []);
           assert.deepEqual(watcher.view?.game?.playableIds, []);
           assert.equal(watcher.view?.game?.canDraw, false);
-          assert.equal(watcher.view?.game?.canCheck, false);
           assert.equal(
             act(watcher, code, { type: "draw" }).ok,
             false,
@@ -936,6 +1026,84 @@ async function main() {
       assert.equal(observer.view?.tournament.eliminatedIds.includes(eliminated ?? ""), false);
       assert.ok(observer.view?.hostId, "someone is still host");
     }
+    resetRooms();
+  }
+
+  // --- check is announced to everybody by itself --------------------------------------------------
+  {
+    const { clients, code, host } = newTable(["Amina", "Paul"], 0);
+    const [amina, paul] = clients;
+
+    assert.ok(act(host, code, { type: "start" }).ok);
+    stage(code, clients, [[s("9", "hearts"), s("3", "hearts")], [s("4", "hearts"), s("5", "hearts")]]);
+    assert.ok(act(amina, code, { cardId: "9-hearts", type: "play" }).ok);
+
+    const seenByPaul = paul.view?.seats.find((x) => x.id === amina.seatId);
+
+    assert.equal(seenByPaul?.handCount, 1);
+    assert.equal(seenByPaul?.checked, true, "Paul's screen shows Amina on check, nobody pressed anything");
+    assert.ok(paul.view?.game?.moves.some((m) => m.type === "check" && m.seatId === amina.seatId));
+    assert.ok(paul.view?.game?.log.some((line) => /Amina.*check/i.test(line)));
+    assert.equal("canCheck" in (amina.view?.game ?? {}), false, "there is no check button any more");
+
+    // taking a card ends it
+    assert.ok(act(paul, code, { type: "draw" }).ok);
+    assert.ok(act(amina, code, { type: "draw" }).ok);
+    assert.equal(paul.view?.seats.find((x) => x.id === amina.seatId)?.checked, false);
+    resetRooms();
+  }
+
+  // --- rounds and ties through the room ------------------------------------------------------------
+  {
+    const { clients, code, host } = newTable(["Amina", "Paul", "Rita"], 0);
+    const [amina, paul, rita] = clients;
+
+    assert.ok(act(host, code, { type: "start" }).ok);
+    stage(
+      code,
+      clients,
+      [[s("9", "hearts")], [s("K", "hearts")], [s("Q", "hearts"), s("4", "diamonds")]],
+      {
+        bank: [s("3", "clubs"), s("4", "clubs"), s("5", "hearts"), s("6", "hearts"), s("9", "diamonds"), s("8", "hearts")],
+      },
+    );
+    assert.ok(act(amina, code, { cardId: "9-hearts", type: "play" }).ok);
+    assert.equal(rita.view?.phase, "playing", "Paul and Rita still have their turn");
+    assert.ok(act(paul, code, { cardId: "K-hearts", type: "play" }).ok);
+    assert.equal(rita.view?.phase, "playing");
+    assert.ok(act(rita, code, { cardId: "Q-hearts", type: "play" }).ok);
+
+    // Amina and Paul finished in the same round: a tie, 2 cards each, Rita watches
+    assert.equal(rita.view?.phase, "playing", "the set goes on");
+    assert.equal(amina.view?.game?.hand.length, 2);
+    assert.equal(paul.view?.game?.hand.length, 2);
+    assert.equal(rita.view?.seats.find((x) => x.id === rita.seatId)?.sittingOut, true);
+    assert.equal(rita.view?.seats.find((x) => x.id === amina.seatId)?.sittingOut, false);
+    assert.ok(rita.view?.game?.moves.some((m) => m.type === "tie" && m.cards === 2 && m.seatIds.length === 2));
+    assert.ok(rita.view?.game?.log.some((line) => /Amina and Paul finished in the same round/.test(line)));
+    assert.equal(rita.view?.game?.currentSeatId, amina.seatId);
+    assert.deepEqual(rita.view?.game?.playableIds, []);
+    assert.equal(rita.view?.game?.canDraw, false);
+    assert.equal(act(rita, code, { type: "draw" }).ok, false, "a benched player cannot take from the bank");
+    assert.ok(!JSON.stringify(rita.view).includes('"8-hearts"'), "the tie cards stay private");
+    resetRooms();
+  }
+
+  // --- the room is plain data: it survives being saved and loaded ----------------------------------
+  {
+    const { clients, code, host } = newTable(["Amina"], 2);
+
+    assert.ok(act(host, code, { type: "start" }).ok);
+    await playOut(code, clients);
+
+    const room = peekRoom(code);
+
+    assert.ok(room);
+
+    const copy = JSON.parse(JSON.stringify(room)) as Room;
+
+    assert.deepEqual(copy, room, "a room is made only of plain data");
+    assert.deepEqual(viewFor(copy, host.seatId, 5), viewFor(room, host.seatId, 5));
     resetRooms();
   }
 

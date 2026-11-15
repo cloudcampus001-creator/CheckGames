@@ -1,0 +1,23 @@
+Copy the folders of this zip over your cheque-games project, same paths, replacing the files.
+(Every file here is either new or replaces an existing one. Nothing to delete.)
+
+NEW files:
+  src/server/store.ts
+  src/server/service.ts
+  src/server/service.test.ts
+  src/server/test-support/fake-upstash.ts
+  src/app/api/health/route.ts
+
+REPLACED files:
+  README.md, package.json
+  src/cheque-games/engine.ts, engine.test.ts
+  src/server/rooms.ts, rooms.test.ts, routes.test.ts
+  src/app/api/rooms/route.ts
+  src/app/api/rooms/[code]/action/route.ts, join/route.ts, state/route.ts
+  src/app/api/rooms/[code]/events/route.ts   (now just a small "no longer used" answer; you may delete that folder)
+  src/multiplayer/Table.tsx, useRoom.ts, protocol.ts, HomeScreen.tsx, Lobby.tsx
+
+ON VERCEL (needed once, or games will still vanish):
+  1. Vercel project > Storage > add "Upstash Redis" and connect it to the project.
+  2. Redeploy.
+  3. Open https://your-site/api/health  -> it must say "storage":"redis","ok":true.

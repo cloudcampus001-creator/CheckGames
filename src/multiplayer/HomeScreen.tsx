@@ -18,9 +18,30 @@ export function HomeScreen() {
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Set when the server cannot keep games safely (see /api/health).
+  const [storageWarning, setStorageWarning] = useState<string | null>(null);
 
   useEffect(() => {
     setName(loadName());
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    fetch("/api/health", { cache: "no-store" })
+      .then((response) => response.json())
+      .then((body: { error?: string; warning?: string | null }) => {
+        if (!cancelled) {
+          setStorageWarning(body.warning ?? body.error ?? null);
+        }
+      })
+      .catch(() => {
+        // the check itself is optional
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   async function createGame() {
@@ -157,6 +178,15 @@ export function HomeScreen() {
           Join game
         </button>
       </section>
+
+      {storageWarning ? (
+        <p
+          className="rounded-xl bg-amber-300/20 px-4 py-3 text-center text-amber-100 text-sm"
+          data-storage-warning
+        >
+          {storageWarning}
+        </p>
+      ) : null}
 
       {error ? (
         <p className="rounded-xl bg-red-500/20 px-4 py-3 text-center text-red-200 text-sm">

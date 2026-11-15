@@ -6,7 +6,7 @@
     "dev": "next dev -H 0.0.0.0",
     "build": "next build",
     "start": "next start -H 0.0.0.0",
-    "test": "tsx src/cheque-games/engine.test.ts && tsx src/server/rooms.test.ts && tsx src/server/routes.test.ts"
+    "test": "tsx src/cheque-games/engine.test.ts && tsx src/server/rooms.test.ts && tsx src/server/routes.test.ts && tsx src/server/service.test.ts"
   },
   "dependencies": {
     "clsx": "latest",
