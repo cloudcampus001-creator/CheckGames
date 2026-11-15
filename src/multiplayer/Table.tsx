@@ -38,10 +38,21 @@ const NO_PLAYED: readonly string[] = [];
 
 /**
  * The blink is plain CSS, so it keeps going whatever the animation library or
- * the browser does. The keyframes are defined once in the table.
+ * the browser does. It only changes opacity, which the graphics card can do
+ * without repainting anything. The keyframes are defined once in the table.
  */
 const BLINK = { animation: "cheque-blink 0.9s ease-in-out infinite" } as const;
 const BLINK_CSS = "@keyframes cheque-blink{0%,100%{opacity:.15}50%{opacity:1}}";
+
+/** A bright colour for each seat's initial, picked from the seat's position. */
+const SEAT_COLOURS = [
+  "bg-amber-300",
+  "bg-rose-300",
+  "bg-sky-300",
+  "bg-lime-300",
+  "bg-fuchsia-300",
+  "bg-orange-300",
+];
 
 const ordinal = (n: number) => {
   const tens = n % 100;
@@ -484,18 +495,18 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
   }
 
   return (
-    <div className="relative flex min-h-screen flex-col overflow-hidden bg-emerald-950 text-white">
+    <div className="relative flex min-h-dvh flex-col overflow-hidden text-white">
       <style>{BLINK_CSS}</style>
-      <div className="flex items-center justify-between gap-3 px-5 py-3">
+      <div className="flex items-center justify-between gap-3 px-4 py-3">
         <div className="flex items-center gap-2">
-          <span className="rounded-full bg-white/10 px-3 py-1 font-semibold text-sm tracking-widest">
+          <span className="display rounded-full bg-black/25 px-4 py-1.5 text-sm tracking-widest">
             {view.code}
           </span>
           {settings.elimination ? (
             <span
               className={cn(
-                "rounded-full px-3 py-1 font-semibold text-xs tracking-widest",
-                tournament.finalSet ? "bg-amber-300 text-emerald-950" : "bg-white/10",
+                "display rounded-full px-3 py-1.5 text-xs tracking-widest",
+                tournament.finalSet ? "bg-amber-300 text-emerald-950" : "bg-black/25",
               )}
               data-set-badge
             >
@@ -505,7 +516,7 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
         </div>
         <div className="flex items-center gap-3">
           {connected ? null : (
-            <span className="text-amber-300 text-xs">Reconnecting…</span>
+            <span className="font-bold text-amber-300 text-xs">Reconnecting…</span>
           )}
           <button className={quietButton} onClick={onLeave} type="button">
             Leave
@@ -513,12 +524,14 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
         </div>
       </div>
 
-      <div className="flex flex-wrap justify-center gap-3 px-4 pt-1">
-        {others.map((seat) => (
+      <div className="flex flex-wrap justify-center gap-3 px-3 pt-2">
+        {others.map((seat, index) => (
           <div
             className={cn(
-              "relative flex min-w-[92px] flex-col items-center gap-2 rounded-2xl px-3 py-3 transition-colors",
-              seat.isCurrent ? "bg-white/15" : "bg-white/5",
+              "relative flex min-w-[96px] flex-col items-center gap-1.5 rounded-3xl border-2 px-3 pt-3 pb-2.5 transition-colors",
+              seat.isCurrent
+                ? "border-amber-300 bg-amber-300/20 shadow-[0_4px_0_rgba(184,125,0,0.7)]"
+                : "border-white/10 bg-black/20",
               seat.connected ? "" : "opacity-60",
               (!seat.inGame || seat.sittingOut) && "opacity-45",
             )}
@@ -528,22 +541,42 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
           >
             {onCheck(seat) ? (
               <div
-                className="pointer-events-none absolute inset-0 rounded-2xl bg-amber-300/15 ring-2 ring-amber-300"
+                className="pointer-events-none absolute inset-0 rounded-3xl bg-amber-300/20 ring-4 ring-amber-300"
                 data-check-blink
                 style={BLINK}
               />
             ) : null}
-            <span className="max-w-[110px] truncate font-medium text-sm">
-              {seat.name}
-            </span>
+            {seat.isCurrent && !game.over ? (
+              <span
+                aria-hidden="true"
+                className="-top-3 -translate-x-1/2 absolute left-1/2 text-amber-300 text-sm leading-none"
+              >
+                ▼
+              </span>
+            ) : null}
+            <div className="flex items-center gap-1.5">
+              <span
+                className={cn(
+                  "display grid size-6 shrink-0 place-items-center rounded-full text-xs",
+                  seat.kind === "bot"
+                    ? "bg-white/25 text-white"
+                    : cn(SEAT_COLOURS[index % SEAT_COLOURS.length], "text-emerald-950"),
+                )}
+              >
+                {seat.kind === "bot" ? "AI" : seat.name.slice(0, 1).toUpperCase()}
+              </span>
+              <span className="max-w-[84px] truncate font-bold text-sm">
+                {seat.name}
+              </span>
+            </div>
             <div className="relative" data-seat-card={seat.id}>
               <PlayingCard faceDown rank="A" suit="spades" width={MINI_CARD_W} />
-              <span className="absolute -right-2 -bottom-2 flex size-6 items-center justify-center rounded-full bg-white font-semibold text-emerald-950 text-xs tabular-nums">
+              <span className="display absolute -right-2 -bottom-2 flex size-6 items-center justify-center rounded-full bg-amber-300 text-emerald-950 text-xs tabular-nums shadow-[0_2px_0_rgba(0,0,0,0.3)]">
                 {seat.handCount}
               </span>
               {seat.rank !== null ? (
                 <span
-                  className="-left-3 -top-3 absolute rounded-full bg-amber-300 px-1.5 py-0.5 font-bold text-[10px] text-emerald-950"
+                  className="display -left-3 -top-3 absolute rounded-full bg-white px-1.5 py-0.5 text-[10px] text-emerald-950"
                   data-rank-badge
                 >
                   {ordinal(seat.rank)}
@@ -552,19 +585,19 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
             </div>
             {onCheck(seat) ? (
               <span
-                className="font-bold text-amber-300 text-xs tracking-wider"
+                className="display text-amber-300 text-xs tracking-wider"
                 data-check-label
                 style={BLINK}
               >
                 CHECK!
               </span>
             ) : (
-              <span className="invisible font-bold text-xs tracking-wider">CHECK!</span>
+              <span className="display invisible text-xs tracking-wider">CHECK!</span>
             )}
             {stopped.includes(seat.id) ? (
               <motion.span
                 animate={{ opacity: 1, scale: 1 }}
-                className="-bottom-2 absolute rounded-full bg-red-500 px-2 py-0.5 font-bold text-[10px] tracking-wider"
+                className="display -bottom-2 absolute rounded-full bg-rose-500 px-2.5 py-0.5 text-[11px] tracking-wider shadow-[0_2px_0_rgba(0,0,0,0.3)]"
                 data-stopped
                 initial={{ opacity: 0, scale: 0.6 }}
               >
@@ -572,12 +605,12 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
               </motion.span>
             ) : null}
             {seat.eliminated ? (
-              <span className="font-semibold text-red-200 text-[10px] tracking-wider">
+              <span className="display text-[11px] text-rose-200 tracking-wider">
                 OUT
               </span>
             ) : seat.sittingOut && !game.over ? (
               <span
-                className="font-semibold text-[10px] text-white/70 tracking-wider"
+                className="display text-[11px] text-white/75 tracking-wider"
                 data-sitting-out
               >
                 WAITING
@@ -588,7 +621,7 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
                 <span className="text-white/60 text-xs">offline</span>
                 {isHost && seat.inGame && !game.over ? (
                   <button
-                    className="rounded-full bg-white/15 px-2.5 py-1 text-xs hover:bg-white/25"
+                    className="rounded-full bg-white/15 px-2.5 py-1 font-semibold text-xs hover:bg-white/25"
                     onClick={() => run({ seatId: seat.id, type: "replaceWithBot" })}
                     type="button"
                   >
@@ -605,7 +638,7 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
       <div className="relative z-30 flex flex-1 flex-col items-center justify-center gap-4 px-4 py-4">
         <div
           aria-live="assertive"
-          className="flex min-h-[2.25rem] flex-col items-center justify-center gap-1"
+          className="flex min-h-[2.5rem] flex-col items-center justify-center gap-1"
           data-toasts
         >
           <AnimatePresence>
@@ -613,14 +646,14 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
               <motion.div
                 animate={{ opacity: 1, scale: 1, y: 0 }}
                 className={cn(
-                  "rounded-full px-5 py-1.5 font-bold text-sm tracking-wide shadow-lg",
+                  "display rounded-full px-6 py-2 text-lg shadow-[0_4px_0_rgba(0,0,0,0.25)]",
                   item.tone === "check"
                     ? "bg-amber-300 text-emerald-950"
-                    : "bg-white/90 text-emerald-950",
+                    : "bg-white text-emerald-950",
                 )}
                 data-toast={item.tone}
                 exit={{ opacity: 0 }}
-                initial={{ opacity: 0, scale: 0.9, y: -10 }}
+                initial={{ opacity: 0, scale: 0.85, y: -10 }}
                 key={item.id}
               >
                 {item.text}
@@ -629,7 +662,12 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
           </AnimatePresence>
         </div>
 
-        <div className="flex items-center gap-6">
+        <div className="relative flex items-center gap-6">
+          {/* The oval of the table, behind the bank and the pile. */}
+          <div
+            aria-hidden="true"
+            className="-inset-x-3 -inset-y-5 -z-10 absolute rounded-[3rem] border-2 border-white/10 bg-black/15"
+          />
           <div className="flex flex-col items-center gap-2">
             <button
               aria-label={
@@ -641,7 +679,7 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
                 "rounded-[10px] transition-transform focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white",
                 game.canDraw
                   ? hasPlay
-                    ? "cursor-pointer ring-2 ring-white/50 hover:-translate-y-1"
+                    ? "cursor-pointer ring-2 ring-white/60 hover:-translate-y-1"
                     : "cursor-pointer ring-4 ring-amber-300 hover:-translate-y-1"
                   : "cursor-default opacity-90",
               )}
@@ -652,7 +690,13 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
             >
               <PlayingCard faceDown rank="A" suit="spades" width={BANK_CARD_W} />
             </button>
-            <span className="text-white/70 text-xs" data-bank-label>
+            <span
+              className={cn(
+                "display rounded-full px-3 py-0.5 text-xs",
+                penaltyForMe ? "bg-rose-500 text-white" : "bg-black/25 text-white/80",
+              )}
+              data-bank-label
+            >
               {penaltyForMe ? `Take ${game.pending}` : `Bank · ${game.bankCount}`}
             </span>
           </div>
@@ -664,10 +708,10 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
           />
         </div>
 
-        <div className="flex min-h-7 flex-wrap items-center justify-center gap-2">
+        <div className="flex min-h-8 flex-wrap items-center justify-center gap-2">
           {game.pending > 0 ? (
             <span
-              className="rounded-full bg-red-500/90 px-3 py-1 font-semibold text-xs"
+              className="display pop rounded-full bg-rose-500 px-4 py-1 text-sm shadow-[0_3px_0_rgba(0,0,0,0.25)]"
               data-chip="pending"
             >
               {isMyTurn
@@ -678,14 +722,14 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
           ) : null}
           {game.demand ? (
             <span
-              className="flex items-center gap-1.5 rounded-full bg-white px-3 py-1 font-semibold text-emerald-950 text-xs"
+              className="display pop flex items-center gap-1.5 rounded-full bg-white px-4 py-1 text-emerald-950 text-sm shadow-[0_3px_0_rgba(0,0,0,0.25)]"
               data-chip="demand"
             >
               Asked for
               <span
                 className={cn(
-                  "text-base leading-none",
-                  isRedSuit(game.demand) ? "text-[#c22f2f]" : "text-[#23262d]",
+                  "text-xl leading-none",
+                  isRedSuit(game.demand) ? "text-[#d6303a]" : "text-[#23262d]",
                 )}
               >
                 {SUIT_SYMBOL[game.demand]}
@@ -697,12 +741,14 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
 
         <div aria-live="polite" className="min-h-[60px] space-y-0.5 text-center text-sm">
           {notice ? (
-            <p className="font-medium text-amber-300">{notice}</p>
+            <p className="font-bold text-amber-300">{notice}</p>
           ) : (
             recent.map((line, index) => (
               <p
                 className={
-                  index === recent.length - 1 ? "text-white/90" : "text-white/45"
+                  index === recent.length - 1
+                    ? "font-semibold text-white"
+                    : "text-white/50"
                 }
                 key={`${recent.length - index}-${line}`}
               >
@@ -712,16 +758,24 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
           )}
         </div>
 
-        <p className="min-h-5 text-center text-white/60 text-xs" data-hint>
+        <p
+          className={cn(
+            "min-h-7 rounded-full px-4 py-1 text-center font-semibold text-sm",
+            isMyTurn && !game.over
+              ? "bg-amber-300 text-emerald-950"
+              : "bg-black/20 text-white/70",
+          )}
+          data-hint
+        >
           {hint}
         </p>
       </div>
 
-      <div className="relative z-20">
+      <div className="relative z-20 bg-gradient-to-t from-black/35 to-transparent">
         {me && onCheck(me) ? (
           <div className="absolute inset-x-0 -top-2 z-[200] flex justify-center">
             <span
-              className="rounded-full bg-white/15 px-5 py-2 font-bold text-amber-300 tracking-wider"
+              className="display rounded-full bg-black/30 px-6 py-2 text-2xl text-amber-300 tracking-wider"
               data-my-check
               style={BLINK}
             >
@@ -741,7 +795,7 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
               className="flex h-full flex-col items-center justify-center gap-1 px-6 text-center"
               data-watching
             >
-              <p className="font-semibold">
+              <p className="display text-2xl">
                 {iAmSittingOut
                   ? "You are sitting this one out"
                   : iAmPlaying
@@ -750,7 +804,7 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
                     ? "You are eliminated for this set"
                     : "You are watching"}
               </p>
-              <p className="text-sm text-white/60">
+              <p className="font-semibold text-sm text-white/70">
                 {iAmSittingOut
                   ? "Players who finished together are playing it off."
                   : iAmPlaying

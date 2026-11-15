@@ -52,9 +52,13 @@ function JoinForm({
 
   return (
     <Shell>
-      <div className="space-y-1 text-center">
-        <h1 className="font-bold text-3xl">Join game</h1>
-        <p className="font-bold text-5xl tracking-[0.3em]">{code}</p>
+      <div className="space-y-3 text-center">
+        <h1 className="display text-4xl text-[var(--cream)] [text-shadow:0_4px_0_rgba(0,0,0,0.28)]">
+          Join game
+        </h1>
+        <p className="display mx-auto w-fit rounded-2xl border-[3px] border-amber-300 border-dashed bg-amber-300/15 px-6 py-2 text-6xl text-amber-300 tracking-[0.25em]">
+          {code}
+        </p>
       </div>
       <input
         aria-label="Your name"
@@ -71,7 +75,7 @@ function JoinForm({
         value={name}
       />
       <button
-        className={`${primaryButton} w-full`}
+        className={`${primaryButton} w-full text-xl`}
         disabled={busy}
         onClick={join}
         type="button"
@@ -79,7 +83,7 @@ function JoinForm({
         Join
       </button>
       {error ? (
-        <p className="rounded-xl bg-red-500/20 px-4 py-3 text-center text-red-200 text-sm">
+        <p className="pop rounded-2xl border-2 border-rose-300/50 bg-rose-500/30 px-4 py-3 text-center font-semibold text-rose-50 text-sm">
           {error}
         </p>
       ) : null}
@@ -119,7 +123,7 @@ export function RoomScreen({ code }: { code: string }) {
   if (!loaded) {
     return (
       <Shell>
-        <p className="text-center text-white/70">Loading…</p>
+        <p className="display text-center text-2xl text-white/80">Loading…</p>
       </Shell>
     );
   }
@@ -131,7 +135,7 @@ export function RoomScreen({ code }: { code: string }) {
   if (room.fatal) {
     return (
       <Shell>
-        <p className="text-center text-lg">{room.fatal}</p>
+        <p className="panel p-5 text-center font-semibold text-lg">{room.fatal}</p>
         <button
           className={`${primaryButton} w-full`}
           onClick={backToStart}
@@ -146,7 +150,9 @@ export function RoomScreen({ code }: { code: string }) {
   if (!room.view) {
     return (
       <Shell>
-        <p className="text-center text-white/70">Connecting to the game…</p>
+        <p className="display text-center text-2xl text-white/80">
+          Connecting to the game…
+        </p>
       </Shell>
     );
   }

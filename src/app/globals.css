@@ -1,10 +1,243 @@
 @import "tailwindcss";
 
-html,
+/*
+ * Cheque-games look: a bright Cameroon-green felt table, chunky gold buttons
+ * with a pressed-down feel, thick rounded panels. Everything here is plain
+ * CSS (transforms and opacity only), so it stays smooth on cheap phones.
+ */
+
+:root {
+  --felt-hi: #25c775;
+  --felt: #0d9a58;
+  --felt-lo: #045a31;
+  --gold: #ffd23f;
+  --gold-lo: #b87d00;
+  --coral: #ff5a5f;
+  --sky: #38d6ff;
+  --cream: #fff6dc;
+  --ink: #052e1c;
+}
+
+html {
+  min-height: 100%;
+  background: var(--felt-lo);
+}
+
 body {
   margin: 0;
-  background: #022c22;
+  min-height: 100dvh;
+  overflow-x: hidden;
   color: white;
   font-family:
-    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    var(--f-body), ui-rounded, system-ui, -apple-system, "Segoe UI", Roboto,
+    sans-serif;
+  background-color: var(--felt-lo);
+  background-image: radial-gradient(
+    120% 80% at 50% 30%,
+    var(--felt-hi) 0%,
+    var(--felt) 42%,
+    var(--felt-lo) 100%
+  );
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* The felt weave and a soft vignette. Fixed, so it never repaints on scroll. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image:
+    radial-gradient(ellipse at center, transparent 50%, rgba(0, 24, 12, 0.42) 100%),
+    repeating-linear-gradient(
+      45deg,
+      rgba(255, 255, 255, 0.04) 0 2px,
+      transparent 2px 28px
+    ),
+    repeating-linear-gradient(
+      -45deg,
+      rgba(255, 255, 255, 0.04) 0 2px,
+      transparent 2px 28px
+    );
+}
+
+/* The game font. Only has one weight, so never fake a bold on it. */
+.display {
+  font-family: var(--f-display), "Arial Rounded MT Bold", system-ui, sans-serif;
+  font-weight: 400;
+  letter-spacing: 0.02em;
+}
+
+@layer components {
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    border: 0;
+    border-radius: 9999px;
+    padding: 0.85rem 1.6rem;
+    font-family: var(--f-display), "Arial Rounded MT Bold", system-ui, sans-serif;
+    font-size: 1.1rem;
+    line-height: 1;
+    letter-spacing: 0.03em;
+    cursor: pointer;
+    user-select: none;
+    transition:
+      transform 0.08s ease,
+      filter 0.15s ease;
+  }
+
+  .btn:disabled {
+    opacity: 0.45;
+    cursor: default;
+    filter: saturate(0.6);
+  }
+
+  .btn:active:not(:disabled) {
+    transform: translateY(4px);
+  }
+
+  .btn:hover:not(:disabled) {
+    filter: brightness(1.06);
+  }
+
+  .btn-gold {
+    color: var(--ink);
+    background: linear-gradient(#ffe56f, #ffc828);
+    box-shadow:
+      0 5px 0 var(--gold-lo),
+      0 10px 16px rgba(0, 0, 0, 0.28),
+      inset 0 2px 0 rgba(255, 255, 255, 0.55);
+  }
+
+  .btn-gold:active:not(:disabled) {
+    box-shadow:
+      0 1px 0 var(--gold-lo),
+      0 3px 6px rgba(0, 0, 0, 0.25),
+      inset 0 2px 0 rgba(255, 255, 255, 0.55);
+  }
+
+  .btn-sky {
+    color: var(--ink);
+    background: linear-gradient(#7be6ff, #2cc4f0);
+    box-shadow:
+      0 5px 0 #0a7fa0,
+      0 10px 16px rgba(0, 0, 0, 0.28),
+      inset 0 2px 0 rgba(255, 255, 255, 0.55);
+  }
+
+  .btn-sky:active:not(:disabled) {
+    box-shadow:
+      0 1px 0 #0a7fa0,
+      0 3px 6px rgba(0, 0, 0, 0.25),
+      inset 0 2px 0 rgba(255, 255, 255, 0.55);
+  }
+
+  .btn-soft {
+    padding: 0.6rem 1.15rem;
+    font-size: 0.95rem;
+    color: white;
+    background: rgba(255, 255, 255, 0.16);
+    box-shadow:
+      0 3px 0 rgba(0, 0, 0, 0.25),
+      inset 0 1px 0 rgba(255, 255, 255, 0.28);
+  }
+
+  .btn-soft:active:not(:disabled) {
+    box-shadow:
+      0 0 0 rgba(0, 0, 0, 0.25),
+      inset 0 1px 0 rgba(255, 255, 255, 0.28);
+  }
+
+  .panel {
+    border: 2px solid rgba(255, 255, 255, 0.14);
+    border-radius: 1.5rem;
+    background: rgba(2, 56, 32, 0.6);
+    box-shadow:
+      0 6px 0 rgba(0, 0, 0, 0.18),
+      inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  }
+
+  .input {
+    width: 100%;
+    border: 2px solid rgba(255, 255, 255, 0.18);
+    border-radius: 1rem;
+    background: rgba(0, 30, 16, 0.45);
+    padding: 0.8rem 1rem;
+    color: white;
+    font-weight: 700;
+    outline: none;
+    transition: border-color 0.15s ease;
+  }
+
+  .input::placeholder {
+    color: rgba(255, 255, 255, 0.4);
+    font-weight: 600;
+  }
+
+  .input:focus {
+    border-color: var(--gold);
+  }
+}
+
+/* A card dealt onto the home screen. */
+@keyframes deal {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 46px, 0) rotate(0deg) scale(0.8);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) rotate(var(--r, 0deg)) scale(1);
+  }
+}
+
+/* A little pop for things that appear. */
+@keyframes pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.85);
+  }
+  70% {
+    transform: scale(1.04);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* Falling confetti for the winner. */
+@keyframes confetti {
+  from {
+    transform: translate3d(0, 0, 0) rotate(0deg);
+  }
+  to {
+    transform: translate3d(var(--dx, 0px), 110vh, 0) rotate(540deg);
+  }
+}
+
+.pop {
+  animation: pop 0.28s ease-out both;
+}
+
+.confetti {
+  position: absolute;
+  top: -20px;
+  width: 10px;
+  height: 16px;
+  border-radius: 3px;
+  animation: confetti linear 1 both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

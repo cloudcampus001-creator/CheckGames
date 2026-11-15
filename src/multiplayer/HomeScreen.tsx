@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { PlayingCard } from "@/components/PlayingCard";
 import {
   createRoomRequest,
   joinRoomRequest,
@@ -10,7 +11,39 @@ import {
   saveCreds,
   saveName,
 } from "./api";
-import { inputClass, primaryButton, quietButton, Shell } from "./ui";
+import { inputClass, primaryButton, quietButton, Shell, skyButton } from "./ui";
+
+/** Three cards dealt onto the page when it opens. Pure CSS, no scripts. */
+function Hero() {
+  const cards = [
+    { delay: "0s", rank: "A", rotate: "-16deg", shift: "-62px", suit: "spades" },
+    { delay: "0.12s", rank: "K", rotate: "0deg", shift: "0px", suit: "hearts" },
+    { delay: "0.24s", rank: "7", rotate: "16deg", shift: "62px", suit: "diamonds" },
+  ] as const;
+
+  return (
+    <div className="relative mx-auto h-[150px] w-[260px]">
+      {cards.map((card) => (
+        <div
+          className="absolute top-2 left-1/2"
+          key={card.rank}
+          style={{
+            animation: `deal 0.6s cubic-bezier(0.2, 0.9, 0.3, 1.15) ${card.delay} both`,
+            ["--r" as string]: card.rotate,
+            marginLeft: `calc(${card.shift} - 42px)`,
+          }}
+        >
+          <PlayingCard
+            className="shadow-[0_8px_18px_rgba(0,0,0,0.35)]"
+            rank={card.rank}
+            suit={card.suit}
+            width={84}
+          />
+        </div>
+      ))}
+    </div>
+  );
+}
 
 export function HomeScreen() {
   const router = useRouter();
@@ -119,13 +152,18 @@ export function HomeScreen() {
 
   return (
     <Shell>
-      <div className="space-y-1 text-center">
-        <h1 className="font-bold text-4xl tracking-wide">Cheque-games</h1>
-        <p className="text-white/70">Finish your cards. Say check. Win.</p>
+      <div className="space-y-2 text-center">
+        <Hero />
+        <h1 className="display text-6xl text-[var(--cream)] [text-shadow:0_5px_0_rgba(0,0,0,0.28)]">
+          Cheque-games
+        </h1>
+        <p className="font-bold text-lg text-amber-200">
+          Finish your cards. Say check. Win.
+        </p>
       </div>
 
       <label className="block space-y-2">
-        <span className="text-sm text-white/70">Your name</span>
+        <span className="font-bold text-sm text-white/80">Your name</span>
         <input
           autoComplete="nickname"
           className={inputClass}
@@ -136,14 +174,14 @@ export function HomeScreen() {
         />
       </label>
 
-      <section className="space-y-3 rounded-2xl bg-white/5 p-5">
-        <h2 className="font-semibold text-lg">Start a game</h2>
-        <p className="text-sm text-white/70">
+      <section className="panel space-y-3 p-5">
+        <h2 className="display text-2xl">Start a game</h2>
+        <p className="text-sm text-white/75">
           You get a code to share. You choose the rules and add computer
           players.
         </p>
         <button
-          className={`${primaryButton} w-full`}
+          className={`${primaryButton} w-full text-xl`}
           disabled={busy}
           onClick={createGame}
           type="button"
@@ -152,13 +190,13 @@ export function HomeScreen() {
         </button>
       </section>
 
-      <section className="space-y-3 rounded-2xl bg-white/5 p-5">
-        <h2 className="font-semibold text-lg">Join a game</h2>
+      <section className="panel space-y-3 p-5">
+        <h2 className="display text-2xl">Join a game</h2>
         <input
           aria-label="Game code"
           autoCapitalize="characters"
           autoComplete="off"
-          className={`${inputClass} text-center font-semibold text-2xl uppercase tracking-[0.4em]`}
+          className={`${inputClass} display text-center text-4xl uppercase tracking-[0.35em]`}
           maxLength={4}
           onChange={(event) => setCode(event.target.value.toUpperCase())}
           onKeyDown={(event) => {
@@ -170,7 +208,7 @@ export function HomeScreen() {
           value={code}
         />
         <button
-          className={`${primaryButton} w-full`}
+          className={`${skyButton} w-full text-xl`}
           disabled={busy || !canJoin}
           onClick={joinGame}
           type="button"
@@ -181,7 +219,7 @@ export function HomeScreen() {
 
       {storageWarning ? (
         <p
-          className="rounded-xl bg-amber-300/20 px-4 py-3 text-center text-amber-100 text-sm"
+          className="rounded-2xl border-2 border-amber-300/50 bg-amber-300/20 px-4 py-3 text-center font-semibold text-amber-100 text-sm"
           data-storage-warning
         >
           {storageWarning}
@@ -189,13 +227,13 @@ export function HomeScreen() {
       ) : null}
 
       {error ? (
-        <p className="rounded-xl bg-red-500/20 px-4 py-3 text-center text-red-200 text-sm">
+        <p className="pop rounded-2xl border-2 border-rose-300/50 bg-rose-500/30 px-4 py-3 text-center font-semibold text-rose-50 text-sm">
           {error}
         </p>
       ) : null}
 
       <div className="space-y-2 text-center">
-        <p className="text-sm text-white/60">Just want to practise?</p>
+        <p className="font-semibold text-sm text-white/70">Just want to practise?</p>
         <button
           className={quietButton}
           disabled={busy}

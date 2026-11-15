@@ -34,6 +34,9 @@ export async function copyText(text: string) {
   }
 }
 
+const roundButton =
+  "display grid size-11 place-items-center rounded-full bg-white/15 text-2xl leading-none shadow-[0_3px_0_rgba(0,0,0,0.25)] transition-transform hover:bg-white/25 active:translate-y-[3px] active:shadow-none disabled:opacity-30";
+
 export function Stepper({
   disabled = false,
   label,
@@ -51,11 +54,11 @@ export function Stepper({
 }) {
   return (
     <div className="flex items-center justify-between gap-4">
-      <span className="text-white/80">{label}</span>
+      <span className="font-semibold text-white/90">{label}</span>
       <div className="flex items-center gap-3">
         <button
           aria-label={`Fewer: ${label}`}
-          className="size-9 rounded-full bg-white/10 text-lg hover:bg-white/20 disabled:opacity-30"
+          className={roundButton}
           disabled={disabled || value <= min}
           onClick={() => onChange(value - 1)}
           type="button"
@@ -64,15 +67,15 @@ export function Stepper({
         </button>
         <span
           className={cn(
-            "w-8 text-center font-semibold text-xl tabular-nums",
-            disabled && "text-white/70",
+            "display w-10 text-center text-3xl tabular-nums",
+            disabled ? "text-white/70" : "text-amber-300",
           )}
         >
           {value}
         </span>
         <button
           aria-label={`More: ${label}`}
-          className="size-9 rounded-full bg-white/10 text-lg hover:bg-white/20 disabled:opacity-30"
+          className={roundButton}
           disabled={disabled || value >= max}
           onClick={() => onChange(value + 1)}
           type="button"
@@ -86,17 +89,16 @@ export function Stepper({
 
 export function Shell({ children }: { children: ReactNode }) {
   return (
-    <div className="flex min-h-screen items-center justify-center bg-emerald-950 p-6 text-white">
+    <div className="flex min-h-dvh items-center justify-center p-5 text-white">
       <div className="w-full max-w-md space-y-5">{children}</div>
     </div>
   );
 }
 
-export const primaryButton =
-  "rounded-full bg-amber-300 px-6 py-3 font-semibold text-emerald-950 transition-opacity hover:opacity-90 disabled:opacity-40";
+export const primaryButton = "btn btn-gold";
 
-export const quietButton =
-  "rounded-full bg-white/10 px-5 py-2 text-sm hover:bg-white/20 disabled:opacity-40";
+export const skyButton = "btn btn-sky";
 
-export const inputClass =
-  "w-full rounded-xl border border-white/15 bg-white/10 px-4 py-3 text-white placeholder:text-white/40 focus:border-amber-300 focus:outline-none";
+export const quietButton = "btn btn-soft";
+
+export const inputClass = "input";

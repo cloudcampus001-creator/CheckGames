@@ -36,7 +36,7 @@ export function Chooser({
 }) {
   return (
     <div
-      className="absolute inset-0 z-[220] flex items-end justify-center bg-black/35 pb-[270px]"
+      className="absolute inset-0 z-[220] flex items-end justify-center bg-black/45 pb-[270px]"
       data-chooser={choice.kind}
       onClick={onCancel}
       role="presentation"
@@ -44,33 +44,33 @@ export function Chooser({
       <div
         aria-label={choice.kind === "two" ? "Where does the 2 go?" : "Which sign do you ask for?"}
         aria-modal="true"
-        className="w-[min(92vw,22rem)] space-y-3 rounded-2xl bg-emerald-900 p-4 text-center shadow-2xl ring-1 ring-white/15"
+        className="pop w-[min(92vw,23rem)] space-y-4 rounded-3xl border-2 border-white/25 bg-[#06683c] p-5 text-center shadow-[0_8px_0_rgba(0,0,0,0.25),0_20px_40px_rgba(0,0,0,0.4)]"
         onClick={(event) => event.stopPropagation()}
         role="dialog"
       >
         {choice.kind === "two" ? (
           <>
-            <p className="font-semibold">Where does the 2 go?</p>
+            <p className="display text-2xl">Where does the 2 go?</p>
             <div className="grid grid-cols-2 gap-3">
               <button
-                className="rounded-xl bg-amber-300 px-3 py-3 font-semibold text-emerald-950 hover:opacity-90"
+                className="btn btn-gold flex-col gap-1 rounded-2xl py-3"
                 data-choose="top"
                 onClick={() => onPlacement("top")}
                 type="button"
               >
                 On top
-                <span className="block font-normal text-emerald-900/80 text-xs">
+                <span className="block font-semibold text-emerald-900/80 text-xs tracking-normal">
                   the 2 becomes the centre card
                 </span>
               </button>
               <button
-                className="rounded-xl bg-white/15 px-3 py-3 font-semibold hover:bg-white/25"
+                className="btn btn-sky flex-col gap-1 rounded-2xl py-3"
                 data-choose="under"
                 onClick={() => onPlacement("under")}
                 type="button"
               >
                 Under
-                <span className="block font-normal text-white/70 text-xs">
+                <span className="block font-semibold text-emerald-900/80 text-xs tracking-normal">
                   the centre card stays
                 </span>
               </button>
@@ -78,14 +78,14 @@ export function Chooser({
           </>
         ) : (
           <>
-            <p className="font-semibold">Ask for which sign?</p>
+            <p className="display text-2xl">Ask for which sign?</p>
             <div className="grid grid-cols-4 gap-2">
               {SUIT_ORDER.map((suit) => (
                 <button
                   aria-label={`Ask for ${suit}`}
                   className={cn(
-                    "rounded-xl bg-white py-3 font-bold text-4xl leading-none hover:scale-105 active:scale-95",
-                    isRedSuit(suit) ? "text-[#c22f2f]" : "text-[#23262d]",
+                    "rounded-2xl bg-white py-3 text-4xl leading-none shadow-[0_5px_0_#b9b29c] transition-transform hover:-translate-y-0.5 active:translate-y-1 active:shadow-[0_1px_0_#b9b29c]",
+                    isRedSuit(suit) ? "text-[#d6303a]" : "text-[#23262d]",
                   )}
                   data-choose={suit}
                   key={suit}
@@ -96,7 +96,7 @@ export function Chooser({
                 </button>
               ))}
             </div>
-            <p className="text-white/60 text-xs">
+            <p className="font-semibold text-white/75 text-xs">
               The next player must play this sign, a 2 or a J.
             </p>
           </>
