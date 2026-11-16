@@ -1,7 +1,7 @@
 "use client";
 
 import { motion, useReducedMotion } from "motion/react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   type JokerColour,
   PlayingCard,
@@ -9,6 +9,11 @@ import {
   type PlayingCardSuit,
 } from "@/components/PlayingCard";
 import { cn } from "@/helpers/classname-helper";
+
+// A card face never changes while it is on screen, so it is drawn once and
+// reused. Without this every card (and its pips) was redrawn on every hover
+// and every update from the server.
+const Face = memo(PlayingCard);
 
 export type FanCard = {
   id: string;
@@ -21,6 +26,10 @@ export type PlayingCardFanProps = {
   /** Card width in pixels. */
   cardWidth?: number;
   className?: string;
+  /**
+   * Called when a card is played. Keep this function the same between renders
+   * (the fan is not redrawn when only this changes).
+   */
   onPlay?: (card: FanCard) => void;
   /** Cards that stay in their place but are invisible (a card still flying in). */
   hiddenIds?: readonly string[];
@@ -88,7 +97,7 @@ function fanTransform(index: number, count: number, spacing: number) {
   };
 }
 
-export function PlayingCardFan({
+function PlayingCardFanBase({
   cards,
   cardWidth = 112,
   className,
@@ -256,6 +265,8 @@ export function PlayingCardFan({
               marginLeft: -cardWidth / 2,
               opacity: hiddenIds?.includes(card.id) ? 0 : 1,
               pointerEvents: hiddenIds?.includes(card.id) ? "none" : undefined,
+              touchAction: "none",
+              willChange: "transform",
               zIndex,
             }}
             transition={cardTransition}
@@ -304,7 +315,7 @@ export function PlayingCardFan({
               }}
               type="button"
             >
-              <PlayingCard
+              <Face
                 className={
                   dimmedIds?.includes(card.id) && !isPlayed
                     ? "brightness-75"
@@ -321,3 +332,34 @@ export function PlayingCardFan({
     </div>
   );
 }
+
+function sameList(a?: readonly string[], b?: readonly string[]) {
+  if (a === b) {
+    return true;
+  }
+
+  if (!a || !b || a.length !== b.length) {
+    return false;
+  }
+
+  return a.every((value, index) => value === b[index]);
+}
+
+/**
+ * The fan is only redrawn when its cards, its size or what is dimmed, hidden
+ * or played really changed. A fresh copy of the same hand (every update from
+ * the server makes one) costs nothing.
+ */
+export const PlayingCardFan = memo(
+  PlayingCardFanBase,
+  (before, after) =>
+    before.cardWidth === after.cardWidth &&
+    before.className === after.className &&
+    sameList(
+      before.cards.map((card) => card.id),
+      after.cards.map((card) => card.id),
+    ) &&
+    sameList(before.dimmedIds, after.dimmedIds) &&
+    sameList(before.hiddenIds, after.hiddenIds) &&
+    sameList(before.playedIds, after.playedIds),
+);

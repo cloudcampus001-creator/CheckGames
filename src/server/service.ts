@@ -46,6 +46,7 @@ const TRIES = 6;
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 type Step<T> = { dirty: boolean; result: T };
+export type ActResult = { ok: true; etag: string; view: RoomView | null } | Failure;
 type Outcome<T> = { kind: "ok"; result: T } | { kind: "missing" } | { kind: "busy" };
 
 /**
@@ -205,14 +206,19 @@ export async function pollRoom(
   return { etag: outcome.result.etag, ok: true, view: outcome.result.view };
 }
 
+/**
+ * Do something in a game. The answer carries the player's new view, so the
+ * browser shows the result straight away instead of asking again (that second
+ * trip used to double the wait after every move).
+ */
 export async function act(
   code: unknown,
   seatId: unknown,
   token: unknown,
   action: unknown,
-): Promise<{ ok: true } | Failure> {
+): Promise<ActResult> {
   const clean = normalizeCode(code);
-  const outcome = await update(clean, (room, now) => {
+  const outcome = await update<ActResult>(clean, (room, now): Step<ActResult> => {
     if (!checkSeat(room, seatId, token)) {
       return { dirty: false, result: failure("You are not part of this game.", 403, true) };
     }
@@ -222,9 +228,18 @@ export async function act(
     const moved = tickBots(room, now);
     const done = applyAction(room, seatId, token, action, now);
 
+    if (!done.ok) {
+      return { dirty: touched || moved, result: failure(done.error) };
+    }
+
     return {
-      dirty: touched || moved || done.ok,
-      result: done.ok ? ({ ok: true } as const) : failure(done.error),
+      dirty: true,
+      result: {
+        etag: etagOf(room, now),
+        ok: true,
+        // A room that was just closed (the last human left) has nobody to show it to.
+        view: room.closed ? null : viewFor(room, String(seatId), now),
+      },
     };
   });
 

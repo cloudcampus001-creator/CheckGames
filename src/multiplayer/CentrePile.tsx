@@ -1,7 +1,7 @@
 "use client";
 
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { useEffect, useRef } from "react";
+import { memo, useEffect, useRef } from "react";
 import {
   type JokerColour,
   PlayingCard,
@@ -9,6 +9,9 @@ import {
   type PlayingCardSuit,
 } from "@/components/PlayingCard";
 import { type FlightOrigin, pileTilt } from "./flights";
+
+// A card face never changes, so it is drawn once and reused.
+const Face = memo(PlayingCard);
 
 export type PileCard = {
   id: string;
@@ -33,7 +36,7 @@ type CentrePileProps = {
  * offset, so the cards underneath show at the edges, like cards tossed on a
  * real table. A new card flies in from wherever it was played.
  */
-export function CentrePile({
+function CentrePileBase({
   cardWidth = 112,
   cards,
   originFor,
@@ -54,14 +57,25 @@ export function CentrePile({
   }, [cards]);
 
   const cardHeight = Math.round((cardWidth * 7) / 5);
-  const rect = boxRef.current?.getBoundingClientRect();
-  const centre = rect
-    ? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
-    : null;
+
+  // Measuring the screen forces the browser to lay the page out, so it is only
+  // done when a card really is arriving (not on every redraw).
+  let centre: { x: number; y: number } | null | undefined;
+  const readCentre = () => {
+    if (centre === undefined) {
+      const rect = boxRef.current?.getBoundingClientRect();
+
+      centre = rect
+        ? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
+        : null;
+    }
+
+    return centre;
+  };
 
   const flight = reduceMotion
     ? ({ duration: 0.12 } as const)
-    : ({ duration: 0.46, ease: [0.2, 0.8, 0.25, 1], type: "tween" } as const);
+    : ({ duration: 0.4, ease: [0.2, 0.8, 0.25, 1], type: "tween" } as const);
 
   return (
     <div
@@ -78,21 +92,22 @@ export function CentrePile({
         {cards.map((card, index) => {
           const tilt = pileTilt(card.id);
           const isNew = !seen.current?.has(card.id);
-          const origin = isNew && centre ? (originFor?.(card.id) ?? null) : null;
+          const middle = isNew ? readCentre() : null;
+          const origin = isNew && middle ? (originFor?.(card.id) ?? null) : null;
 
           let initial:
             | false
             | { opacity: number; rotate: number; scale: number; x: number; y: number } =
             false;
 
-          if (isNew && origin && centre) {
+          if (isNew && origin && middle) {
             // Start where the card was played from.
             initial = {
               opacity: 1,
               rotate: origin.rotate,
               scale: origin.scale,
-              x: origin.x - centre.x,
-              y: origin.y - centre.y,
+              x: origin.x - middle.x,
+              y: origin.y - middle.y,
             };
           } else if (isNew) {
             initial = {
@@ -122,11 +137,12 @@ export function CentrePile({
                 marginTop: -cardHeight / 2,
                 position: "absolute",
                 top: "50%",
+                willChange: "transform",
                 zIndex: index,
               }}
               transition={flight}
             >
-              <PlayingCard rank={card.rank} suit={card.suit} width={cardWidth} />
+              <Face rank={card.rank} suit={card.suit} width={cardWidth} />
             </motion.div>
           );
         })}
@@ -134,3 +150,12 @@ export function CentrePile({
     </div>
   );
 }
+
+/** Redrawn only when the cards on the pile change. */
+export const CentrePile = memo(
+  CentrePileBase,
+  (before, after) =>
+    before.cardWidth === after.cardWidth &&
+    before.cards.length === after.cards.length &&
+    before.cards.every((card, index) => card.id === after.cards[index].id),
+);

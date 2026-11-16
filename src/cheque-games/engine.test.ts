@@ -234,8 +234,22 @@ assert.ok(isSpecial(joker("red")) && !isSpecial(s("9", "hearts")));
   assert.ok(!can(s("J", "spades").rank === "J" ? s("5", "clubs") : s("5", "clubs"), asked));
   assert.ok(can(s("2", "clubs"), asked));
   assert.ok(can(s("J", "clubs"), asked));
-  assert.ok(!can(joker("red"), asked), "a joker is not of that sign");
-  assert.ok(!can(joker("black"), asked));
+
+  // ...and the joker of the colour asked for: red for hearts/diamonds, black for clubs/spades
+  assert.ok(can(joker("red"), asked), "hearts is red: the red joker is allowed");
+  assert.ok(!can(joker("black"), asked), "but not the black one");
+
+  for (const [sign, allowed, refusedColour] of [
+    ["hearts", "red", "black"],
+    ["diamonds", "red", "black"],
+    ["clubs", "black", "red"],
+    ["spades", "black", "red"],
+  ] as const) {
+    const request = on(s("J", "hearts"), { demand: sign });
+
+    assert.ok(can(joker(allowed), request), `${sign}: the ${allowed} joker goes on`);
+    assert.ok(!can(joker(refusedColour), request), `${sign}: the ${refusedColour} joker does not`);
+  }
 
   assert.equal(colourOf(s("3", "diamonds")), "red");
   assert.equal(colourOf(s("3", "clubs")), "black");
@@ -282,6 +296,90 @@ assert.ok(isSpecial(joker("red")) && !isSpecial(s("9", "hearts")));
     skipped.events.filter((e) => e.type === "skip"),
     [{ playerId: "p2", type: "skip" }],
   );
+}
+
+// === the ace as a last card: with two players it cannot win =========================
+{
+  // p0 is on check, plays the ace (the last card) in a two-player game: the other
+  // one is stopped, p0 has to play again with nothing, so takes a card and is still on check
+  const duel = make({ hands: [[s("A", "spades")], [s("4", "hearts"), s("K", "hearts")]] });
+  const after = ok(playCard(duel, "p0", "A-spades"));
+
+  assert.equal(handOf(after, "p0").length, 1, "took a card from the bank");
+  assert.equal(handOf(after, "p0")[0].id, "9-clubs", "the top card of the bank");
+  assert.deepEqual(after.finished, [], "no games with an ace");
+  assert.equal(after.winner, null);
+  assert.equal(after.over, false);
+  assert.equal(after.current, 1, "then the other player is up");
+  assert.ok(after.checked.includes("p0"), "and p0 is on check again");
+  assert.equal(topCard(after).id, "A-spades", "the ace stays on the pile");
+  assert.equal(totalCards(after), totalCards(duel), "no card lost");
+  assert.deepEqual(
+    after.events.filter((e) => e.type === "skip"),
+    [{ playerId: "p1", type: "skip" }],
+  );
+  assert.deepEqual(
+    after.events.filter((e) => e.type === "games"),
+    [],
+  );
+  assert.ok(after.events.some((e) => e.type === "draw" && e.playerId === "p0"));
+  assert.equal(
+    after.events.filter((e) => e.type === "check" && e.playerId === "p0").length,
+    1,
+    "check is announced again after taking the card",
+  );
+
+  // the other player has nothing that fits the ace, takes a card, and p0 is up again
+  const reply = ok(drawCard(after, "p1"));
+
+  assert.equal(reply.current, 0);
+
+  // with three players the ace still wins
+  const three = make({ hands: [[s("A", "spades")], [s("4", "hearts")], [s("5", "hearts")]] });
+  const won = ok(playCard(three, "p0", "A-spades"));
+
+  assert.deepEqual(won.finished, ["p0"]);
+  assert.equal(handOf(won, "p0").length, 0);
+
+  // two left in "ranking": one is already out, so the same rule
+  const late = make({
+    finished: ["p2"],
+    hands: [[s("A", "spades")], [s("4", "hearts")], []],
+    mode: "ranking",
+  });
+  const lateAfter = ok(playCard(late, "p0", "A-spades"));
+
+  assert.deepEqual(lateAfter.finished, ["p2"]);
+  assert.equal(handOf(lateAfter, "p0").length, 1);
+  assert.equal(lateAfter.current, 1);
+  assert.equal(lateAfter.over, false);
+
+  // any other last card still wins with two players
+  const other = make({ hands: [[s("9", "hearts")], [s("4", "hearts"), s("K", "hearts")]] });
+
+  assert.deepEqual(ok(playCard(other, "p0", "9-hearts")).finished, ["p0"]);
+
+  // the ace is not the last card: nothing changes (you simply play again)
+  const notLast = make({ hands: [[s("A", "spades"), s("3", "hearts")], [s("4", "hearts")]] });
+  const again = ok(playCard(notLast, "p0", "A-spades"));
+
+  assert.equal(handOf(again, "p0").length, 1);
+  assert.equal(again.current, 0);
+
+  // bots obey it too: whoever plays it, the game never ends on an ace in a duel
+  for (let seed = 1; seed <= 200; seed++) {
+    const rng = mulberry32(seed);
+    let game = make({
+      bank: [s("3", "clubs"), s("5", "clubs"), s("6", "clubs"), s("8", "clubs")],
+      centre: s("9", "spades"),
+      hands: [[s("A", "spades")], [s("4", "hearts"), s("K", "hearts")]],
+    });
+
+    game = botTurn(game, rng);
+    assert.deepEqual(game.finished, [], `seed ${seed}: an ace never wins a duel`);
+    assert.equal(handOf(game, "p0").length, 1);
+    assert.equal(totalCards(game), 8);
+  }
 }
 
 // === the 2: plays on anything, on top or under ===================================
@@ -462,7 +560,7 @@ assert.ok(isSpecial(joker("red")) && !isSpecial(s("9", "hearts")));
   assert.equal(a.demand, "diamonds");
   assert.equal(a.current, 1);
 
-  // p1 must play a diamond, a 2 or a jack
+  // p1 must play a diamond, a 2 or a jack (the black joker does not go on a red sign)
   assert.deepEqual(ids(legalPlays(a, "p1")), ["5-diamonds", "2-clubs", "J-clubs"]);
   refused(playCard(a, "p1", "5-spades"), /diamond card, a 2 or a jack/);
   refused(playCard(a, "p1", "joker-black"));
@@ -499,6 +597,45 @@ assert.ok(isSpecial(joker("red")) && !isSpecial(s("9", "hearts")));
   assert.equal(won.over, false, "the other player still plays the round");
   assert.deepEqual(won.finished, ["p0"]);
   assert.ok(ok(drawCard(won, "p1")).over);
+}
+
+// === a jack asks for a colour: the joker of that colour answers ==========================
+{
+  const hands = [
+    [s("J", "hearts"), s("J", "spades"), s("3", "clubs")],
+    [joker("red"), joker("black"), s("5", "diamonds"), s("6", "spades")],
+    [s("8", "diamonds"), s("8", "clubs")],
+  ];
+
+  // a red sign: the red joker is allowed, the black one is not
+  const red = ok(playCard(make({ hands, centre: s("9", "spades") }), "p0", "J-hearts", { suit: "hearts" }));
+
+  assert.deepEqual(ids(legalPlays(red, "p1")), ["joker-red"], "hearts asked: the red joker, no hearts in hand");
+  refused(playCard(red, "p1", "joker-black"), /red joker/);
+
+  // playing it works like any joker: the next player owes 4 and the request is gone
+  const answered = ok(playCard(red, "p1", "joker-red"));
+
+  assert.equal(topCard(answered).id, "joker-red");
+  assert.equal(answered.pending, 4);
+  assert.equal(answered.demand, null);
+  assert.equal(answered.current, 2);
+
+  // a black sign: the black joker is allowed (and a black card of that sign)
+  const black = ok(playCard(make({ hands, centre: s("9", "hearts") }), "p0", "J-spades", { suit: "spades" }));
+
+  assert.deepEqual(ids(legalPlays(black, "p1")), ["joker-black", "6-spades"]);
+  refused(playCard(black, "p1", "joker-red"), /black joker/);
+  assert.equal(ok(playCard(black, "p1", "joker-black")).pending, 4);
+
+  // diamonds is red too, clubs is black
+  const diamonds = ok(playCard(make({ hands, centre: s("9", "spades") }), "p0", "J-hearts", { suit: "diamonds" }));
+
+  assert.deepEqual(ids(legalPlays(diamonds, "p1")), ["joker-red", "5-diamonds"]);
+
+  const clubs = ok(playCard(make({ hands, centre: s("9", "spades") }), "p0", "J-hearts", { suit: "clubs" }));
+
+  assert.deepEqual(ids(legalPlays(clubs, "p1")), ["joker-black"]);
 }
 
 // === the bank is always open; the pile is mixed into a new bank ==========================

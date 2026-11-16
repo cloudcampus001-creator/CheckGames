@@ -1,9 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { cn } from "@/helpers/classname-helper";
+import { ChatBox } from "./Chat";
+import { SoundButton } from "./Dock";
 import { type ClientAction, MAX_SEATS, MIN_SEATS, type RoomView } from "./protocol";
+import { ReactionLayer, ReactionTray } from "./Reactions";
 import { copyText, inputClass, primaryButton, quietButton, Stepper } from "./ui";
+import { StartVote, VoteCard } from "./VotePanel";
 
 type LobbyProps = {
   connected: boolean;
@@ -76,20 +80,36 @@ export function Lobby({ connected, onAction, onLeave, view }: LobbyProps) {
     }
   }
 
+  const nameOf = useCallback(
+    (id: string) => view.seats.find((seat) => seat.id === id)?.name ?? "Someone",
+    [view.seats],
+  );
+  const sendChat = useCallback(
+    (text: string) => onAction({ text, type: "chat" }),
+    [onAction],
+  );
+
   const seatCount = view.seats.length;
   const canStart = seatCount >= MIN_SEATS;
+  const me = view.seats.find((seat) => seat.id === view.you);
+  const readyCount = view.seats.filter((seat) => seat.ready).length;
+  const whatsapp = `https://wa.me/?text=${encodeURIComponent(
+    `Come and play Cheque-games with me! Code: ${view.code} ${shareUrl}`,
+  )}`;
 
   return (
     <div className="flex min-h-dvh justify-center p-5 text-white">
       <div className="w-full max-w-lg space-y-5 py-3">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-2">
           <h1 className="display text-4xl text-[var(--cream)] [text-shadow:0_4px_0_rgba(0,0,0,0.28)]">
             Game lobby
           </h1>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
             {connected ? null : (
               <span className="font-bold text-amber-300 text-xs">Reconnecting…</span>
             )}
+            <SoundButton />
+            <ReactionTray onSend={(emoji) => void onAction({ emoji, type: "react" })} />
             <button className={quietButton} onClick={onLeave} type="button">
               Leave
             </button>
@@ -127,6 +147,14 @@ export function Lobby({ connected, onAction, onLeave, view }: LobbyProps) {
               {copied === "link" ? "Copied" : "Copy link"}
             </button>
           </div>
+          <a
+            className="btn btn-soft w-full gap-2 bg-[#25d366]/30"
+            href={whatsapp}
+            rel="noopener noreferrer"
+            target="_blank"
+          >
+            Invite on WhatsApp
+          </a>
           {isLocalAddress && isHost ? (
             <p className="rounded-xl bg-amber-300/20 px-3 py-2 text-amber-100 text-xs">
               You opened this page as “localhost”, so this link only works on
@@ -134,11 +162,7 @@ export function Lobby({ connected, onAction, onLeave, view }: LobbyProps) {
               address instead (like http://192.168.1.20:3000), then share the
               new link or just the code.
             </p>
-          ) : (
-            <p className="text-white/55 text-xs">
-              They need to be on the same network as this computer.
-            </p>
-          )}
+          ) : null}
         </section>
 
         <section className="panel space-y-3 p-5">
@@ -165,6 +189,7 @@ export function Lobby({ connected, onAction, onLeave, view }: LobbyProps) {
             {view.seats.map((seat, index) => (
               <li
                 className="flex items-center justify-between gap-3 rounded-2xl bg-black/20 px-4 py-2.5"
+                data-react-anchor={seat.id}
                 key={seat.id}
               >
                 <div className="flex min-w-0 items-center gap-3">
@@ -187,23 +212,76 @@ export function Lobby({ connected, onAction, onLeave, view }: LobbyProps) {
                       host
                     </span>
                   ) : null}
+                  {seat.wins > 0 ? (
+                    <span
+                      className="display rounded-full bg-white/15 px-2 py-0.5 text-xs"
+                      title="Games won in this room"
+                    >
+                      🏆 {seat.wins}
+                    </span>
+                  ) : null}
                   {seat.connected ? null : (
                     <span className="text-white/55 text-xs">offline</span>
                   )}
                 </div>
-                {isHost && seat.id !== view.you ? (
-                  <button
-                    aria-label={`Remove ${seat.name}`}
-                    className="size-8 shrink-0 rounded-full text-white/60 hover:bg-white/10 hover:text-white"
-                    onClick={() => run({ seatId: seat.id, type: "removeSeat" })}
-                    type="button"
-                  >
-                    ✕
-                  </button>
-                ) : null}
+                <div className="flex shrink-0 items-center gap-1.5">
+                  {seat.kind === "human" ? (
+                    <span
+                      className={cn(
+                        "display rounded-full px-2.5 py-0.5 text-xs",
+                        seat.ready ? "bg-lime-300 text-emerald-950" : "bg-white/10 text-white/50",
+                      )}
+                      data-ready={seat.ready ? "true" : "false"}
+                    >
+                      {seat.ready ? "READY" : "…"}
+                    </span>
+                  ) : null}
+                  {isHost && seat.kind === "human" && seat.id !== view.you ? (
+                    <button
+                      aria-label={`Make ${seat.name} the host`}
+                      className="grid size-8 place-items-center rounded-full text-sm text-white/60 hover:bg-white/10 hover:text-white"
+                      onClick={() => run({ seatId: seat.id, type: "makeHost" })}
+                      title="Make host"
+                      type="button"
+                    >
+                      👑
+                    </button>
+                  ) : null}
+                  {isHost && seat.id !== view.you ? (
+                    <button
+                      aria-label={`Remove ${seat.name}`}
+                      className="size-8 rounded-full text-white/60 hover:bg-white/10 hover:text-white"
+                      onClick={() => run({ seatId: seat.id, type: "removeSeat" })}
+                      type="button"
+                    >
+                      ✕
+                    </button>
+                  ) : null}
+                </div>
               </li>
             ))}
           </ul>
+
+          <button
+            className={cn("btn w-full", me?.ready ? "btn-soft" : "btn-sky")}
+            data-action="ready"
+            onClick={() => run({ ready: !me?.ready, type: "ready" })}
+            type="button"
+          >
+            {me?.ready ? "Not ready" : "I am ready"}
+          </button>
+          <p className="text-center text-white/55 text-xs">
+            {readyCount}/{seatCount} ready
+          </p>
+        </section>
+
+        {view.vote ? (
+          <VoteCard nameOf={nameOf} onAction={(action) => void run(action)} vote={view.vote} />
+        ) : null}
+
+        <section className="panel space-y-3 p-5">
+          <h2 className="display text-2xl">Chat</h2>
+          <ChatBox className="h-64" messages={view.chat} onSend={sendChat} you={view.you} />
         </section>
 
         <section className="panel space-y-4 p-5" data-rules>
@@ -280,12 +358,34 @@ export function Lobby({ connected, onAction, onLeave, view }: LobbyProps) {
             </div>
           ) : null}
 
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="font-semibold text-white/90">Back to the lobby by itself</p>
+              <p className="text-white/60 text-xs">
+                After a game the results show for a few seconds, then everybody
+                is back here, ready for the next one.
+              </p>
+            </div>
+            <Switch
+              checked={view.autoReturn}
+              disabled={!isHost}
+              label="Back to the lobby by itself"
+              onChange={(value) => run({ type: "setAutoReturn", value })}
+            />
+          </div>
+
+          <StartVote onAction={(action) => void run(action)} view={view} />
+
           <details className="rounded-2xl bg-black/20 px-4 py-3 text-sm text-white/75">
             <summary className="cursor-pointer font-bold text-white/90">
               Special cards
             </summary>
             <ul className="mt-2 list-disc space-y-1 pl-5 text-xs">
-              <li>A: the next player is stopped; the one after plays.</li>
+              <li>
+                A: the next player is stopped; the one after plays. With two
+                players you play again, so an A can never be your winning card
+                then: you take a card and stay on check.
+              </li>
               <li>2: goes on anything, on top of the pile or under it (the centre card then stays).</li>
               <li>
                 7: the next player takes 2 from the bank. Joker: takes 4. They
@@ -298,7 +398,9 @@ export function Lobby({ connected, onAction, onLeave, view }: LobbyProps) {
               </li>
               <li>
                 J: goes on anything. The player names a sign; the next player
-                must play that sign, a 2 or a J.
+                must play that sign, a 2, a J, or the joker of that colour (red
+                joker for hearts and diamonds, black joker for clubs and
+                spades).
               </li>
             </ul>
           </details>
@@ -325,6 +427,8 @@ export function Lobby({ connected, onAction, onLeave, view }: LobbyProps) {
           </p>
         )}
       </div>
+
+      <ReactionLayer nameOf={nameOf} reactions={view.reactions} you={view.you} />
     </div>
   );
 }

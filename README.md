@@ -3,153 +3,109 @@
 The Cameroonian card game: finish all your cards, say **check** when you have
 one left, and win with **games** when you play the last one.
 
-Play with friends on the same network. One person creates a game and shares a
-4-letter code. That person is the host: they choose the rules, add computer
+One person creates a game and shares a 4-letter code (or taps **Invite on
+WhatsApp**). That person is the host: they choose the rules, add computer
 players and start the game.
 
 ## Run it
 
-You need [Node.js](https://nodejs.org) 20 or newer (the LTS version is fine).
+You need [Node.js](https://nodejs.org) 20 or newer.
 
 ```bash
-cd cheque-games
 npm install
 npm run dev
 ```
 
-### Playing with friends on your network
+Friends on the same network open `http://YOUR-COMPUTER-IP:3000` (not
+`localhost`) and type the code. Add that address to `allowedDevOrigins` in
+`next.config.ts` if the dev server complains.
 
-1. On the computer that runs the game, open the game with its **network
-   address**, not `localhost`. For you that is:
+## Make it truly realtime (recommended)
 
-   **http://169.254.197.238:3000**
+Without a realtime server the page asks the website about every half second.
+That works anywhere (including Vercel alone) but each move can take a moment to
+show up. With the realtime server every move, card, chat line and sticker is
+**pushed to everybody the instant it happens**, and bots play on exact timers.
 
-   (If you open it as `localhost`, the lobby warns you, because the share link
-   would then only work on your own computer.)
-2. Click **Create game**. You get a code such as `K7QD` and a link.
-3. Your friends open the same address in their browser, type the code under
-   **Join a game** (or open your link), and enter their name.
-4. In the lobby you set the rules, click **+ Add bot** for computer players,
-   and press **Start the game**.
+The realtime server is `realtime/server.ts`. It uses the same rules as the
+website and has no extra packages. It keeps games in memory, so it needs no
+database.
 
-Things that can get in the way:
+1. Start it: `npm run realtime` (it listens on port 4000, or on `PORT`).
+2. Tell the website where it is, with the variable
+   `NEXT_PUBLIC_REALTIME_URL` (see `.env.example`):
+   - same computer: put `NEXT_PUBLIC_REALTIME_URL=http://localhost:4000` in a
+     file called `.env.local`, then restart `npm run dev`.
+   - friends on your network: use `http://YOUR-COMPUTER-IP:4000`.
+   - online: deploy the same project on a host that keeps a program running
+     (Render, Railway, Fly.io...). Build command `npm install`, start command
+     `npm run realtime`. Then, in Vercel, add `NEXT_PUBLIC_REALTIME_URL` with
+     the address it gives you (`https://...`) and **redeploy**. Optional: on
+     the realtime host set `ALLOWED_ORIGINS=https://your-game.vercel.app` so
+     only your website can connect.
+3. Open `http://localhost:4000` (or your host's address) in a browser: it must
+   answer `{"ok":true,...}`.
 
-- **Same network.** Everyone must be on the same Wi-Fi or cable network as the
-  computer running the game. An address starting with `169.254` usually means
-  the computer has no router giving it an address, so it only works for a
-  device connected straight to it. On a normal Wi-Fi network run `ipconfig`
-  (Windows) or `ifconfig` / `ip a` (Mac / Linux) and use the address it shows
-  instead. Then add it to `allowedDevOrigins` in `next.config.ts`.
-- **Firewall.** The first time, Windows may ask whether Node.js may accept
-  connections. Allow it on private networks.
-- **Port 3000** must be free. To use another port: `npm run dev -- -p 3001`.
+Good to know: free hosts put idle programs to sleep, so the first connection
+after a quiet hour can take half a minute. If the realtime server restarts, the
+games on it start over. Leave `NEXT_PUBLIC_REALTIME_URL` empty and the game goes
+back to the plain version by itself.
 
-For a faster, production-style run: `npm run build` then `npm start`.
+### Plain version on Vercel: make it faster
 
-### Practising alone
+- In your Upstash database and in Vercel (Settings > Functions > Function
+  Region) pick regions **near each other and near your players** (for players in
+  Cameroon: Paris, Frankfurt or Cape Town; Upstash: the nearest to it).
+- Open `/api/health` to check: it must say `"storage":"redis"`.
 
-On the start page, **Play against 2 bots** makes a normal game with two bots
-and starts it straight away.
+## Playing
 
-## How a game works
-
-- Everyone gets the same number of cards (the host chooses how many).
-- One card goes face up in the middle. The rest is the **bank**.
-- On your turn you either:
-  - **play** a card with the same **number or letter** (character) or the same
-    **sign** (suit) as the centre card. Tap it, or flick it upward; or
-  - **take a card from the bank.** This is always allowed on your turn, even if
-    you have a card you could play. Taking a card ends your turn.
-- When the **bank is finished**, all the cards under the centre card are
-  **mixed** and become the new bank. The centre card stays.
-- Down to one card? You are **on check**. Nothing to press: the table
-  announces it by itself. Everyone else sees your seat **blink** and a banner.
-  Take a card and the check goes away.
-- Play your last card: **GAMES!**
-- The game counts **rounds** quietly in the background: a round is over when
-  everybody still playing has had their turn since it began.
+- On your turn play a card with the same number or sign as the centre card, or
+  take a card from the bank (any time; it ends your turn). Your card appears on
+  the pile the moment you tap it.
+- A bank that runs out is refilled by mixing the pile (the centre card stays).
+- Down to one card? You are **on check**: announced by itself. Play your last
+  card: **GAMES!**
 
 ### Special cards
 
 | Card | What it does |
 | --- | --- |
-| **A** | The next player is stopped (they get a STOPPED badge). The one after plays. With two players you play again. |
-| **2** | Goes on anything. You choose **On top** (it becomes the centre card) or **Under** (the centre card stays). |
+| **A** | The next player is stopped; the one after plays. **With two players you play again, so an A cannot be your winning card: you take a card from the bank and stay on check.** |
+| **2** | Goes on anything: **On top** (it becomes the centre card) or **Under** (the centre card stays). |
 | **7** | The next player takes **2** from the bank. |
 | **Joker** | The next player takes **4**. |
-| **J** | Goes on anything. You name a sign; the next player must play that sign, a **2** or a **J**. |
+| **J** | Goes on anything. You name a sign; the next player must play that sign, a **2**, a **J**, **or the joker of that colour: the red joker for hearts and diamonds, the black joker for clubs and spades.** |
 
-- If you are hit by a 7 or a joker you can answer with a 7 or a joker (any
-  sign, any colour) and the total grows (2 + 2 = 4, 2 + 4 = 6, …) for the next
-  player. Otherwise you take everything owed from the bank.
-- Outside of that, the red joker only goes on a red card (hearts or diamonds)
-  and the black joker on a black card (clubs or spades). Only a red card goes
-  on a red joker, and a black card on a black joker.
-- When you take a card from the bank you see it **rise, turn over and slide
-  into your hand**. Others see a face-down card fly to you.
+- Hit by a 7 or a joker you can answer with a 7 or a joker (any sign, any colour);
+  the total grows for the next player. Otherwise you take everything owed.
+- Otherwise the red joker only goes on a red card and the black joker on a black card.
 
 ### How a set ends (the host chooses)
 
-- **Stop:** when a player plays their last card, the others still play the rest
-  of that round, then the set ends and that player wins. If **two or more**
-  players finish in the same round it is a tie: each of them takes **2 cards**
-  from the bank and they play it off between themselves (the others wait). The
-  first one to finish while the round completes wins.
-- **Keep going:** the others carry on until everybody is ranked: 1st, 2nd, 3rd…
-  A finished player watches. Everyone sees the ranking at the end.
-- **Eliminate the loser** (only with *Keep going*): after each set the last
-  player is out for the next one, until two are left. That set is the
-  **final**. After the final's winner, the host can press **Play again** and
-  everyone, the eliminated included, is back.
+- **Stop:** the others finish the round; the first one out wins. Several out in
+  the same round? Each takes 2 cards and they play it off.
+- **Keep going:** everybody is ranked 1st, 2nd, 3rd...
+- **Eliminate the loser:** after each set the last player is out, until two are
+  left (the final). Then everybody can play again.
 
-The host can also remove players in the lobby, swap a player who has dropped
-off for a bot during a game, and send everyone back to the lobby afterwards.
-If someone closes the page they can come back to the same seat by opening the
-same link in the same browser.
+## Together with friends
 
-## What you see on the table
-
-- Played cards fly from where they were (your hand, or the other player's
-  seat) onto the centre pile.
-- The pile is untidy like a real one: every card lies at its own angle, so the
-  cards underneath show at the edges. Everyone sees the same pile.
-- A card taken from the bank flies to whoever took it.
-- When the bank is finished, the pile's cards gather, swing across to mix, and
-  land on the bank.
-
-## Where things are
-
-| File | What it does |
-| --- | --- |
-| `src/cheque-games/engine.ts` | All the rules, special cards included. No React, easy to test. |
-| `src/server/rooms.ts` | The rules of a room as plain functions: codes, host controls, bots. Each player only ever receives their own cards. |
-| `src/server/store.ts` | Where rooms are kept: Upstash Redis when configured, memory otherwise. |
-| `src/server/service.ts` | Load a room, run the rules, save it again (with safe retries). |
-| `src/app/api/rooms/...` | The network side: create, join, actions and the state (asked for about every second). |
-| `src/app/api/health/route.ts` | Open `/api/health` to see how games are being stored. |
-| `src/multiplayer/useRoom.ts` | How the browser follows a game: it asks, and repeats if a request fails. |
-| `src/multiplayer/Table.tsx` | The table: seats, bank, pile, your hand. |
-| `src/multiplayer/CentrePile.tsx` | The untidy centre pile and card flights onto it. |
-| `src/multiplayer/FlightLayer.tsx` | Cards flying from the bank, and the mixing. |
-| `src/multiplayer/flights.ts` | Pile angles and screen-position helpers. |
-| `src/multiplayer/Choosers.tsx` | The "on top / under" question for a 2 and the sign picker for a J. |
-| `src/multiplayer/ResultsOverlay.tsx` | End of a set: ranking, who is out, the champion, host buttons. |
-| `src/multiplayer/Lobby.tsx`, `HomeScreen.tsx`, `RoomScreen.tsx` | The other screens. The lobby has the host's rules. |
-| `src/components/PlayingCard.tsx`, `PlayingCardFan.tsx` | Your card components. |
-| `public/experiments/` | **Placeholder** court cards and card back. |
-
-Your two card components have small additions: `PlayingCard` can draw the red
-and black **joker**; `PlayingCardFan` names jokers for screen readers, can dim
-cards you cannot play (`dimmedIds`) and can keep a card invisible while it is
-still flying in (`hiddenIds`). Each card button also has a `data-card-id`
-attribute, so the table knows where a card was on screen when you played it.
-
-## Replace the placeholder art
-
-The jack, queen and king pictures in `public/experiments/courts/` (named like
-`QH.png`: rank, then suit letter) and `public/experiments/card-back.png` are
-simple generated stand-ins. Drop your own images in with the same file names
-and they are used automatically.
+- **Chat** in the lobby and during the game (💬), with one-tap phrases and unread
+  counter. New lines also pop up as a bubble over the player who wrote them.
+- **Stickers** (😀): 12 emojis and 4 badges (GG!, WOW!...) that float up from the
+  player with a different animation each time. Bots throw some too.
+- **Ready** buttons in the lobby, a **host crown** to hand the table over, and
+  **Invite on WhatsApp**.
+- **Votes:** anybody can call a vote on the number of cards, jokers or how a game
+  ends (the result is applied automatically), vote to **remove a player** (3 or
+  more players), or vote for a **rematch** after a game. Everybody who is there
+  votes, or time runs out (30 s).
+- **Back to the lobby by itself** a few seconds after a game, with a countdown
+  (the host can switch it off). Not during an elimination tournament.
+- **Scoreboard:** games won in the room (🏆) show in the lobby and on the results.
+- **Sounds** made on the spot (no files), a chime and buzz on your turn, and the
+  tab title says "Your turn!" when the page is in the background. 🔊 mutes it.
 
 ## Tests
 
@@ -157,76 +113,20 @@ and they are used automatically.
 npm test
 ```
 
-Runs the rules (every special card, rounds and ties, automatic check, and 900
-simulated games with jokers), the room server (host settings, privacy of hands
-and of drawn cards, kicking, leaving, reconnecting, ranking, elimination and the
-final, full games with people and bots), the network layer, and a stress test
-with many players joining and acting at the same moment against a stand-in for
-Redis.
+Rules (every special card, 900 simulated games), rooms, chat/stickers/votes/auto
+return (`src/server/social.test.ts`), the network layer, and real games over
+real WebSockets against the realtime server.
 
-## Rules I had to decide (change them in `engine.ts`)
+## Where things are
 
-- Players go one after another, one card per turn (clockwise).
-- Taking a card from the bank ends your turn, even if you took it by choice.
-- The bank is only open on your own turn.
-- If the bank is empty and there is nothing under the centre card to mix in,
-  you must play if you can. If you cannot, your turn passes.
-- The very first centre card is never a special card (A, 2, 7, J, joker).
-- Under a 7 or joker attack you may only answer with a 7 or a joker. A 2 or a J
-  cannot stop it.
-- A sign asked for by a J stays until a card lands **on top**. A 2 slipped
-  **under** does not cancel it.
-- A joker in the centre accepts only cards of its colour (or a 2, a J, or its
-  own colour's joker), and a joker goes on a 7 whatever the colours.
-- If the bank cannot give all the cards owed, you take what there is.
-- If nobody can move any more (empty bank, no playable cards), the set ends and
-  the player with the fewest cards ranks highest.
-- Check is announced automatically, so there is nothing to forget.
-- Tie play-off: only the players who finished in the same round play on, and
-  each takes 2 cards. If those finish again in the same round, it repeats.
-  Ranking mode ("Keep going") is not affected by any of this.
-- With two players, an Ace makes you play again.
-- Jokers are on by default; the host can switch them off.
-
-## Putting it online (Vercel)
-
-On Vercel, every request can be answered by a different short-lived server, so
-a game kept in one server's memory "no longer exists" a moment later, and bots
-that rely on timers stop. This version keeps every game in a small shared
-database instead, and no server needs to remember anything. You have to give it
-that database once:
-
-1. In your Vercel project open **Storage** (or **Marketplace**) and add
-   **Upstash Redis** (the free plan is enough). Connect it to the project.
-   This adds environment variables named `KV_REST_API_URL` and
-   `KV_REST_API_TOKEN` (or `UPSTASH_REDIS_REST_URL` and
-   `UPSTASH_REDIS_REST_TOKEN`). Either pair works.
-2. **Redeploy** the project (environment variables only apply to new
-   deployments).
-3. Open `https://your-site/api/health`. It must say `"storage":"redis"` and
-   `"ok":true`. If it says `"memory"`, the variables are not set on this
-   deployment. The home screen also shows a yellow warning in that case.
-
-How it behaves:
-
-- The browser asks the server for the game about every second (every 5 s in a
-  background tab). There is no open connection that a host could cut. If a
-  request fails the browser simply asks again; the "game no longer exists"
-  message only appears if the game is really gone (everybody left, or nobody
-  touched it for 24 hours).
-- Bots take their turn when somebody asks about the game, so with at least one
-  human connected they play normally. If everybody closes the page the game
-  waits where it is.
-- Two people acting at the same instant cannot overwrite each other: each save
-  checks that nobody saved first, and otherwise the move is applied again to
-  the newer game.
-- On the free Upstash plan the number of commands is limited. Asking about every
-  second costs roughly 3,600 commands per hour per player, so an evening of
-  play with a few friends is well inside a normal month. Leave tabs closed
-  when you are not playing.
-
-## Good to know
-
-- On your own computer with no database set, games live in memory (fine for
-  one `npm run dev` / `npm start` process; restarting clears them).
-- Games are deleted from the database 24 hours after the last move.
+| File | What it does |
+| --- | --- |
+| `src/cheque-games/engine.ts` | All the rules. No React, easy to test. |
+| `src/server/rooms.ts` | A room as plain functions: codes, host controls, bots, votes, auto return. |
+| `src/server/social.ts` | Chat, stickers, ready, wins and votes. |
+| `src/server/store.ts`, `service.ts` | Rooms in Upstash Redis (or memory) for the plain version. |
+| `realtime/` | The realtime server (`server.ts`), its tiny WebSocket layer (`ws.ts`) and start file. |
+| `src/multiplayer/rt.ts`, `useRoom.ts` | How the browser follows a game (push or ask). |
+| `src/multiplayer/Table.tsx`, `Lobby.tsx`, `ResultsOverlay.tsx` | The screens. |
+| `src/multiplayer/Chat.tsx`, `Reactions.tsx`, `VotePanel.tsx`, `Dock.tsx` | Chat, stickers, votes, buttons. |
+| `src/multiplayer/sound.ts` | The sound effects. |

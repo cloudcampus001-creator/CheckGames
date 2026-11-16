@@ -241,3 +241,101 @@ body::before {
     transition-duration: 0.01ms !important;
   }
 }
+
+/*
+ * Stickers floating up from a player. Four moods; each only moves, turns and
+ * fades, so they never make the page repaint. translate(-50%, -50%) keeps the
+ * sticker centred on the spot it starts from.
+ */
+.react {
+  animation: react-0 2.3s ease-out both;
+  will-change: transform, opacity;
+}
+
+.react-1 {
+  animation-name: react-1;
+}
+
+.react-2 {
+  animation-name: react-2;
+}
+
+.react-3 {
+  animation-name: react-3;
+}
+
+@keyframes react-0 {
+  0% {
+    opacity: 0;
+    transform: translate3d(-50%, -30%, 0) scale(0.3);
+  }
+  14% {
+    opacity: 1;
+    transform: translate3d(-50%, -70%, 0) scale(1.35);
+  }
+  28% {
+    transform: translate3d(-50%, -90%, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(-50%, -380%, 0) scale(1.1);
+  }
+}
+
+@keyframes react-1 {
+  0% {
+    opacity: 0;
+    transform: translate3d(-50%, -30%, 0) rotate(-20deg) scale(0.3);
+  }
+  14% {
+    opacity: 1;
+    transform: translate3d(-50%, -70%, 0) rotate(14deg) scale(1.3);
+  }
+  35% {
+    transform: translate3d(-40%, -130%, 0) rotate(-12deg) scale(1);
+  }
+  60% {
+    transform: translate3d(-60%, -220%, 0) rotate(12deg) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(-50%, -380%, 0) rotate(-8deg) scale(0.95);
+  }
+}
+
+@keyframes react-2 {
+  0% {
+    opacity: 0;
+    transform: translate3d(-50%, -30%, 0) rotate(0deg) scale(0.2);
+  }
+  16% {
+    opacity: 1;
+    transform: translate3d(-50%, -80%, 0) rotate(180deg) scale(1.3);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(-50%, -360%, 0) rotate(560deg) scale(0.9);
+  }
+}
+
+@keyframes react-3 {
+  0% {
+    opacity: 0;
+    transform: translate3d(-50%, -50%, 0) scale(0.1);
+  }
+  18% {
+    opacity: 1;
+    transform: translate3d(-50%, -90%, 0) scale(1.9);
+  }
+  34% {
+    transform: translate3d(-50%, -100%, 0) scale(1.5);
+  }
+  80% {
+    opacity: 1;
+    transform: translate3d(-50%, -200%, 0) scale(1.5);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(-50%, -300%, 0) scale(1.2);
+  }
+}

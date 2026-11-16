@@ -1,12 +1,13 @@
 {
   "name": "cheque-games",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "scripts": {
     "dev": "next dev -H 0.0.0.0",
     "build": "next build",
     "start": "next start -H 0.0.0.0",
-    "test": "tsx src/cheque-games/engine.test.ts && tsx src/server/rooms.test.ts && tsx src/server/routes.test.ts && tsx src/server/service.test.ts"
+    "realtime": "tsx realtime/start.ts",
+    "test": "tsx src/cheque-games/engine.test.ts && tsx src/server/rooms.test.ts && tsx src/server/social.test.ts && tsx src/server/routes.test.ts && tsx src/server/service.test.ts && tsx realtime/realtime.test.ts"
   },
   "dependencies": {
     "clsx": "latest",
@@ -14,7 +15,8 @@
     "next": "latest",
     "react": "latest",
     "react-dom": "latest",
-    "tailwind-merge": "latest"
+    "tailwind-merge": "latest",
+    "tsx": "latest"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "latest",
@@ -22,7 +24,6 @@
     "@types/react": "latest",
     "@types/react-dom": "latest",
     "tailwindcss": "latest",
-    "tsx": "latest",
     "typescript": "latest"
   }
 }

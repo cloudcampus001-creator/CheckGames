@@ -1,6 +1,7 @@
 /** Browser-side helpers: remembering who you are, and creating/joining games. */
 
-import type { ClientAction } from "./protocol";
+import type { ClientAction, RoomView } from "./protocol";
+import { realtimeEnabled, rtRequest } from "./rt";
 
 export type Creds = { seatId: string; token: string };
 
@@ -68,7 +69,23 @@ async function readJson(response: Response) {
 
 const jsonHeaders = { "content-type": "application/json" };
 
+function joinedFrom(data: Record<string, unknown> | null, fallback: string): Joined {
+  if (!data || data.ok !== true) {
+    return { error: String(data?.error ?? fallback), ok: false };
+  }
+
+  return {
+    code: String(data.code),
+    creds: { seatId: String(data.seatId), token: String(data.token) },
+    ok: true,
+  };
+}
+
 export async function createRoomRequest(name: string): Promise<Joined> {
+  if (realtimeEnabled) {
+    return joinedFrom(await rtRequest("create", { name }), "Could not start a game.");
+  }
+
   try {
     const response = await fetch("/api/rooms", {
       body: JSON.stringify({ name }),
@@ -77,17 +94,71 @@ export async function createRoomRequest(name: string): Promise<Joined> {
     });
     const data = await readJson(response);
 
-    if (!response.ok || !data || data.ok !== true) {
-      return { error: String(data?.error ?? "Could not start a game."), ok: false };
+    return joinedFrom(response.ok ? data : { error: data?.error }, "Could not start a game.");
+  } catch {
+    return { error: "Could not reach the game server.", ok: false };
+  }
+}
+
+export type ActionResult = {
+  /** An error message, or null if it worked. */
+  error: string | null;
+  /**
+   * The player's new view, when the answer carries it (plain requests do; over
+   * the realtime server the view is pushed instead).
+   */
+  view: RoomView | null;
+  etag: string | null;
+  fatal: boolean;
+};
+
+/** Do something in a game. */
+export async function postActionFull(
+  code: string,
+  creds: Creds,
+  action: ClientAction,
+): Promise<ActionResult> {
+  if (realtimeEnabled) {
+    const reply = await rtRequest("act", {
+      action,
+      code,
+      seatId: creds.seatId,
+      token: creds.token,
+    });
+
+    return {
+      error: reply.ok === true ? null : String(reply.error ?? "That did not work."),
+      etag: null,
+      fatal: reply.fatal === true,
+      view: null,
+    };
+  }
+
+  try {
+    const response = await fetch(`/api/rooms/${encodeURIComponent(code)}/action`, {
+      body: JSON.stringify({ action, seatId: creds.seatId, token: creds.token }),
+      headers: jsonHeaders,
+      method: "POST",
+    });
+    const data = await readJson(response);
+
+    if (data?.ok === true) {
+      return {
+        error: null,
+        etag: typeof data.etag === "string" ? data.etag : null,
+        fatal: false,
+        view: (data.view as RoomView | null | undefined) ?? null,
+      };
     }
 
     return {
-      code: String(data.code),
-      creds: { seatId: String(data.seatId), token: String(data.token) },
-      ok: true,
+      error: String(data?.error ?? "That did not work."),
+      etag: null,
+      fatal: data?.fatal === true,
+      view: null,
     };
   } catch {
-    return { error: "Could not reach the game server.", ok: false };
+    return { error: "Could not reach the game server.", etag: null, fatal: false, view: null };
   }
 }
 
@@ -97,41 +168,30 @@ export async function postAction(
   creds: Creds,
   action: ClientAction,
 ): Promise<string | null> {
-  try {
-    const response = await fetch(`/api/rooms/${encodeURIComponent(code)}/action`, {
-      body: JSON.stringify({ action, seatId: creds.seatId, token: creds.token }),
-      headers: jsonHeaders,
-      method: "POST",
-    });
-    const data = await readJson(response);
-
-    return data?.ok === true ? null : String(data?.error ?? "That did not work.");
-  } catch {
-    return "Could not reach the game server.";
-  }
+  return (await postActionFull(code, creds, action)).error;
 }
 
 export async function joinRoomRequest(code: string, name: string): Promise<Joined> {
   const clean = code.trim().toUpperCase();
+  // An old token for this game gives you your old seat back.
+  const token = loadCreds(clean)?.token;
+
+  if (realtimeEnabled) {
+    return joinedFrom(
+      await rtRequest("join", { code: clean, name, token }),
+      "Could not join that game.",
+    );
+  }
 
   try {
     const response = await fetch(`/api/rooms/${encodeURIComponent(clean)}/join`, {
-      // An old token for this game gives you your old seat back.
-      body: JSON.stringify({ name, token: loadCreds(clean)?.token }),
+      body: JSON.stringify({ name, token }),
       headers: jsonHeaders,
       method: "POST",
     });
     const data = await readJson(response);
 
-    if (!response.ok || !data || data.ok !== true) {
-      return { error: String(data?.error ?? "Could not join that game."), ok: false };
-    }
-
-    return {
-      code: String(data.code),
-      creds: { seatId: String(data.seatId), token: String(data.token) },
-      ok: true,
-    };
+    return joinedFrom(response.ok ? data : { error: data?.error }, "Could not join that game.");
   } catch {
     return { error: "Could not reach the game server.", ok: false };
   }

@@ -1,9 +1,13 @@
 "use client";
 
 import { motion } from "motion/react";
+import { useEffect, useRef } from "react";
 import { cn } from "@/helpers/classname-helper";
 import type { ClientAction, RoomView } from "./protocol";
+import { playSfx } from "./sound";
 import { primaryButton, quietButton } from "./ui";
+import { useCountdown } from "./useCountdown";
+import { StartVote, VoteCard } from "./VotePanel";
 
 const ordinal = (n: number) => {
   const tens = n % 100;
@@ -36,9 +40,22 @@ const CONFETTI = Array.from({ length: 22 }, (_, index) => ({
   left: (index * 47) % 100,
 }));
 
+/** "Back to the lobby in 12s". Counts on its own so the rest does not redraw. */
+function BackToLobby({ ms }: { ms: number }) {
+  const left = useCountdown(ms);
+
+  return (
+    <p className="font-semibold text-sm text-white/70" data-return>
+      Back to the lobby in {Math.ceil((left ?? 0) / 1000)}s
+    </p>
+  );
+}
+
 /**
  * Shown when a set is over: who won, the ranking when the host chose to play
- * on, who is eliminated, the champion after a final, and the host's buttons.
+ * on, who is eliminated, the champion after a final, the scoreboard of the
+ * room, a vote for a rematch, and the host's buttons. The table goes back to
+ * the lobby by itself after a few seconds (the host can switch that off).
  */
 export function ResultsOverlay({
   onAction,
@@ -50,6 +67,22 @@ export function ResultsOverlay({
   view: RoomView;
 }) {
   const game = view.game;
+  const announced = useRef(false);
+  const champion = view.tournament.championId;
+  const iWon = game ? (champion ? champion === view.you : game.winnerId === view.you) : false;
+
+  // A little fanfare when the results appear.
+  useEffect(() => {
+    if (announced.current) {
+      return;
+    }
+
+    announced.current = true;
+
+    const timer = setTimeout(() => playSfx(iWon ? "win" : "games"), 900);
+
+    return () => clearTimeout(timer);
+  }, [iWon]);
 
   if (!game) {
     return null;
@@ -58,14 +91,15 @@ export function ResultsOverlay({
   const isHost = view.hostId === view.you;
   const { tournament, settings } = view;
   const nameOf = (id: string) => view.seats.find((seat) => seat.id === id)?.name ?? "Someone";
-  const champion = tournament.championId;
   const ranking = settings.endMode === "ranking";
   const last = game.standings[game.standings.length - 1];
   const eliminatedNow =
     settings.elimination && !champion && ranking && last ? last.seatId : null;
   const stillIn = view.seats.filter((seat) => !tournament.eliminatedIds.includes(seat.id)).length;
   const nextIsFinal = settings.elimination && stillIn === 2;
-  const iWon = champion ? champion === view.you : game.winnerId === view.you;
+  const scores = view.seats
+    .filter((seat) => seat.wins > 0)
+    .sort((a, b) => b.wins - a.wins);
 
   let title = "GAMES!";
   let subtitle = "";
@@ -83,7 +117,7 @@ export function ResultsOverlay({
   return (
     <motion.div
       animate={{ opacity: 1 }}
-      className="absolute inset-0 z-[300] flex flex-col items-center justify-center gap-4 overflow-hidden bg-[#033d24]/95 px-6 text-center"
+      className="absolute inset-x-0 top-16 bottom-0 z-[300] flex flex-col items-center justify-center gap-3 overflow-y-auto overflow-x-hidden bg-[#033d24]/95 px-6 py-4 text-center"
       data-results
       initial={{ opacity: 0 }}
       transition={{ delay: 0.9, duration: 0.4 }}
@@ -155,6 +189,16 @@ export function ResultsOverlay({
         </ol>
       ) : null}
 
+      {scores.length > 0 ? (
+        <p className="flex flex-wrap justify-center gap-x-3 gap-y-1 text-sm text-white/75" data-scores>
+          {scores.map((seat) => (
+            <span key={seat.id}>
+              🏆 <span className="font-bold">{seat.name}</span> {seat.wins}
+            </span>
+          ))}
+        </p>
+      ) : null}
+
       {eliminatedNow ? (
         <p className="font-semibold text-sm text-white/75">
           {eliminatedNow === view.you
@@ -166,6 +210,12 @@ export function ResultsOverlay({
         <p className="font-semibold text-sm text-white/75">
           Everybody, eliminated players included, can play again.
         </p>
+      ) : null}
+
+      {view.vote ? (
+        <div className="w-full max-w-sm text-left">
+          <VoteCard nameOf={nameOf} onAction={onAction} vote={view.vote} />
+        </div>
       ) : null}
 
       {isHost ? (
@@ -201,9 +251,17 @@ export function ResultsOverlay({
       ) : (
         <p className="font-semibold text-sm text-white/65">Waiting for the host…</p>
       )}
-      <button className={quietButton} onClick={onLeave} type="button">
-        Leave
-      </button>
+
+      <div className="flex flex-wrap items-center justify-center gap-3">
+        {!isHost || (!tournament.nextSetAvailable && !champion) ? (
+          <StartVote onAction={onAction} view={view} />
+        ) : null}
+        <button className={quietButton} onClick={onLeave} type="button">
+          Leave
+        </button>
+      </div>
+
+      {view.returnInMs !== null ? <BackToLobby ms={view.returnInMs} /> : null}
     </motion.div>
   );
 }

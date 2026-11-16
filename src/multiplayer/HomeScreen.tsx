@@ -11,6 +11,7 @@ import {
   saveCreds,
   saveName,
 } from "./api";
+import { realtimeEnabled } from "./rt";
 import { inputClass, primaryButton, quietButton, Shell, skyButton } from "./ui";
 
 /** Three cards dealt onto the page when it opens. Pure CSS, no scripts. */
@@ -59,6 +60,11 @@ export function HomeScreen() {
   }, []);
 
   useEffect(() => {
+    // With the realtime server the games live there, not in the website's storage.
+    if (realtimeEnabled) {
+      return;
+    }
+
     let cancelled = false;
 
     fetch("/api/health", { cache: "no-store" })

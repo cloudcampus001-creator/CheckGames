@@ -1,23 +1,26 @@
-Copy the folders of this zip over your cheque-games project, same paths, replacing the files.
-(Every file here is either new or replaces an existing one. Nothing to delete.)
+HOW TO UPDATE
+=============
+1. Unzip this folder over your cheque-games project (same folders). Your computer will
+   ask to replace files: say yes to all. Nothing has to be deleted.
+2. Run:  npm install      (tsx moved to the normal dependencies)
+3. Run:  npm test         (optional: checks the rules and the server)
+4. Run:  npm run dev
 
-NEW files:
-  src/server/store.ts
-  src/server/service.ts
-  src/server/service.test.ts
-  src/server/test-support/fake-upstash.ts
-  src/app/api/health/route.ts
+NEW FILES
+  realtime/ws.ts, realtime/server.ts, realtime/start.ts, realtime/realtime.test.ts
+  src/server/social.ts, src/server/social.test.ts
+  src/multiplayer/rt.ts, sound.ts, useCountdown.ts, Dock.tsx, Chat.tsx, Reactions.tsx, VotePanel.tsx
+  .env.example
 
-REPLACED files:
-  README.md, package.json
+REPLACED FILES
+  package.json, README.md
+  src/app/globals.css, src/app/layout.tsx
   src/cheque-games/engine.ts, engine.test.ts
-  src/server/rooms.ts, rooms.test.ts, routes.test.ts
-  src/app/api/rooms/route.ts
-  src/app/api/rooms/[code]/action/route.ts, join/route.ts, state/route.ts
-  src/app/api/rooms/[code]/events/route.ts   (now just a small "no longer used" answer; you may delete that folder)
-  src/multiplayer/Table.tsx, useRoom.ts, protocol.ts, HomeScreen.tsx, Lobby.tsx
+  src/server/rooms.ts, service.ts
+  src/components/PlayingCardFan.tsx
+  src/multiplayer/protocol.ts, api.ts, useRoom.ts, CentrePile.tsx, Choosers.tsx, HomeScreen.tsx,
+  Lobby.tsx, ResultsOverlay.tsx, RoomScreen.tsx, Table.tsx, ui.tsx
 
-ON VERCEL (needed once, or games will still vanish):
-  1. Vercel project > Storage > add "Upstash Redis" and connect it to the project.
-  2. Redeploy.
-  3. Open https://your-site/api/health  -> it must say "storage":"redis","ok":true.
+FOR REAL REALTIME (very recommended)
+  See "Make it truly realtime" in README.md:
+  run  npm run realtime  and set NEXT_PUBLIC_REALTIME_URL (see .env.example).

@@ -18,7 +18,11 @@
  *    had their turn since it began. The system keeps track of that quietly.
  *
  * Special cards
- *  - A      The next player is stopped; the one after plays.
+ *  - A      The next player is stopped; the one after plays. With only two
+ *           players that "one after" is you again, so you play again. That is
+ *           why an A can NOT be your winning card when two are playing: you
+ *           would have to play again with no card, so you take one from the
+ *           bank and you are on check again.
  *  - 2      Plays on anything. You choose: on top (it becomes the centre
  *           card) or under (the centre card stays as it was).
  *  - 7      The next player takes 2 cards from the bank...
@@ -27,8 +31,9 @@
  *           that, a red joker only goes on a red card, a black one on a
  *           black card.
  *  - J      Plays on anything. You name a sign. The next player must play a
- *           card of that sign, or a 2, or a J. The request stays until a
- *           card lands on top.
+ *           card of that sign, or a 2, or a J, or the joker of that sign's
+ *           colour (red joker for hearts/diamonds, black joker for
+ *           clubs/spades). The request stays until a card lands on top.
  *
  * How a set ends
  *  - "first":   when a player goes out, the others still play the rest of
@@ -181,13 +186,18 @@ export function isSpecial(card: Card) {
   return isJoker(card) || SPECIAL_RANKS.has(card.rank);
 }
 
+/** Hearts and diamonds are red; clubs and spades are black. */
+export function suitColour(suit: Suit): JokerColour {
+  return suit === "hearts" || suit === "diamonds" ? "red" : "black";
+}
+
 /** Red or black: the colour of a card's suit, or of a joker. */
 export function colourOf(card: Card): JokerColour {
   if (isJoker(card)) {
     return card.suit;
   }
 
-  return card.suit === "hearts" || card.suit === "diamonds" ? "red" : "black";
+  return suitColour(card.suit);
 }
 
 export function createDeck(includeJokers = false): Card[] {
@@ -323,12 +333,14 @@ export function isPlayable(card: Card, context: PlayContext) {
     return card.rank === "7" || isJoker(card);
   }
 
-  // After a jack: the sign asked for, or a 2, or a jack.
+  // After a jack: the sign asked for, a 2, a jack, or the joker of the
+  // colour asked for (the red joker for a red sign, the black for a black).
   if (context.demand) {
     return (
       card.rank === "2" ||
       card.rank === "J" ||
-      (isStandard(card) && card.suit === context.demand)
+      (isStandard(card) && card.suit === context.demand) ||
+      (isJoker(card) && card.suit === suitColour(context.demand))
     );
   }
 
@@ -353,7 +365,7 @@ function whyNot(card: Card, context: PlayContext) {
   }
 
   if (context.demand) {
-    return `Play a ${context.demand.slice(0, -1)} card, a 2 or a jack.`;
+    return `Play a ${context.demand.slice(0, -1)} card, a 2 or a jack, or the ${suitColour(context.demand)} joker.`;
   }
 
   if (isJoker(card)) {
@@ -647,13 +659,19 @@ export function playCard(
   let winner = state.winner;
   let over = false;
 
+  // With only two players left, an ace stops the other one and the turn comes
+  // straight back to you. With no card in hand you would have to take one, so
+  // the ace cannot be the card that wins the game.
+  const aceStopsAtTheEnd =
+    hand.length === 0 && skipNext && activePlayers(state).length === 2;
+
   if (hand.length === 1) {
     // Down to one card: on check. Everybody is told, no button needed.
     checked.push(playerId);
     events.push({ playerId, type: "check" });
   }
 
-  if (hand.length === 0) {
+  if (hand.length === 0 && !aceStopsAtTheEnd) {
     finished = [...finished, playerId];
     winner = winner ?? playerId;
     events.push({ playerId, rank: finished.length, type: "games" });
@@ -692,27 +710,52 @@ export function playCard(
     };
   }
 
-  return {
-    ok: true,
-    state: passTurn(
-      {
-        ...state,
-        checked,
-        demand,
-        events,
-        finished,
-        over,
-        pending,
-        pile,
-        players,
-        stalled: 0,
-        winner,
+  const rng = options.rng ?? Math.random;
+  const passed = passTurn(
+    {
+      ...state,
+      checked,
+      demand,
+      events,
+      finished,
+      over,
+      pending,
+      pile,
+      players,
+      stalled: 0,
+      winner,
+    },
+    state.current,
+    skipNext,
+    rng,
+  );
+
+  if (!aceStopsAtTheEnd || passed.over) {
+    return { ok: true, state: passed };
+  }
+
+  // The turn is back with the player who just played their last card, so
+  // they take a card from the bank and are on check again.
+  const drawn = drawCard(passed, playerId, rng);
+
+  if (!drawn.ok) {
+    return { ok: true, state: passed };
+  }
+
+  const taken = drawn.state.players.find((p) => p.id === playerId);
+
+  if (taken && taken.hand.length === 1 && !drawn.state.checked.includes(playerId)) {
+    return {
+      ok: true,
+      state: {
+        ...drawn.state,
+        checked: [...drawn.state.checked, playerId],
+        events: [...drawn.state.events, { playerId, type: "check" }],
       },
-      state.current,
-      skipNext,
-      options.rng ?? Math.random,
-    ),
-  };
+    };
+  }
+
+  return drawn;
 }
 
 /**

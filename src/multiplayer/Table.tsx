@@ -1,17 +1,27 @@
 "use client";
 
 import { AnimatePresence, motion } from "motion/react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import type { Placement, Suit } from "@/cheque-games/engine";
 import { PlayingCard } from "@/components/PlayingCard";
 import { type FanCard, PlayingCardFan } from "@/components/PlayingCardFan";
 import { cn } from "@/helpers/classname-helper";
 import { Chooser, type Choice, isRedSuit, SUIT_SYMBOL } from "./Choosers";
 import { CentrePile } from "./CentrePile";
+import { ChatDrawer, useUnread } from "./Chat";
+import { ChatButton, SoundButton } from "./Dock";
 import { type FlightOrigin, queryBox, rotationOf } from "./flights";
 import { FlightLayer, type Ghost } from "./FlightLayer";
 import type { ClientAction, MoveView, RoomView } from "./protocol";
+import { ReactionLayer, ReactionTray } from "./Reactions";
 import { ResultsOverlay } from "./ResultsOverlay";
+import { buzz, playSfx, type Sfx } from "./sound";
 import { quietButton } from "./ui";
 
 type TableProps = {
@@ -23,6 +33,9 @@ type TableProps = {
 
 type Toast = { id: number; text: string; tone: "check" | "info" };
 
+/** A card the player just played, shown on the pile before the server has answered. */
+type Pending = { cardId: string; placement: Placement };
+
 // Card sizes in pixels.
 const PILE_CARD_W = 112;
 const BANK_CARD_W = 96;
@@ -32,6 +45,8 @@ const MINI_CARD_W = 40;
 const MAX_REPLAY = 24;
 /** Seconds between the cards of a penalty, so each one is seen. */
 const PENALTY_STEP = 0.28;
+/** How long a chat bubble stays over a player. */
+const BUBBLE_MS = 4500;
 
 // The fan keeps no pile of its own: the server decides what has been played.
 const NO_PLAYED: readonly string[] = [];
@@ -112,7 +127,7 @@ function drawGhost(
 
     return {
       delay,
-      duration: 0.85,
+      duration: 0.75,
       face: { rank: move.card.rank, suit: move.card.suit },
       from: { x: bank.x, y: bank.y },
       fromRotate: 0,
@@ -135,7 +150,7 @@ function drawGhost(
 
   return {
     delay,
-    duration: 0.45,
+    duration: 0.4,
     fadeOut: true,
     from: { x: bank.x, y: bank.y },
     fromRotate: 0,
@@ -185,6 +200,10 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [stopped, setStopped] = useState<string[]>([]);
   const [choice, setChoice] = useState<Choice | null>(null);
+  const [pending, setPending] = useState<Pending | null>(null);
+  const [drawing, setDrawing] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [bubbles, setBubbles] = useState<Record<string, { id: number; text: string }>>({});
   // Where the player's own cards were on screen when they were played.
   const handOrigins = useRef(
     new Map<string, { at: number; origin: FlightOrigin }>(),
@@ -192,14 +211,29 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
   const tapped = useRef<{ cardId: string; origin: FlightOrigin | null } | null>(null);
   const lastSeq = useRef<number | null>(null);
   const gameKey = useRef<number | null>(null);
+  const lastChat = useRef<number | null>(null);
+  const wasMyTurn = useRef(false);
   const ghostCount = useRef(0);
   const toastCount = useRef(0);
   const viewRef = useRef(view);
+  // The fan is only redrawn when its cards change, so it gets one function that never changes.
+  const playRef = useRef<(card: FanCard) => void>(() => {});
+  const onPlayStable = useCallback((card: FanCard) => playRef.current(card), []);
 
   viewRef.current = view;
 
   const isMyTurnNow =
     !!game && !game.over && game.currentSeatId === view.you;
+  const unread = useUnread(view.chat, chatOpen, view.you);
+
+  const nameOf = useCallback(
+    (id: string) => view.seats.find((seat) => seat.id === id)?.name ?? "Someone",
+    [view.seats],
+  );
+  const sendChat = useCallback(
+    (text: string) => onAction({ text, type: "chat" }),
+    [onAction],
+  );
 
   useEffect(() => {
     if (!notice) {
@@ -217,6 +251,102 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
       setChoice(null);
     }
   }, [choice, isMyTurnNow]);
+
+  // A played card shows on the pile at once. It stays that way until the
+  // server's table has the card (it is gone from the hand), or the move failed.
+  useEffect(() => {
+    if (pending && !(game?.hand.some((card) => card.id === pending.cardId) ?? false)) {
+      setPending(null);
+    }
+  }, [pending, game?.hand]);
+
+  useEffect(() => {
+    if (!pending) {
+      return;
+    }
+
+    const timer = setTimeout(() => setPending(null), 6000);
+
+    return () => clearTimeout(timer);
+  }, [pending]);
+
+  // Your turn: a chime, a buzz on phones, and the tab title when the page is in the background.
+  useEffect(() => {
+    if (isMyTurnNow && !wasMyTurn.current) {
+      playSfx("turn");
+      buzz(35);
+    }
+
+    wasMyTurn.current = isMyTurnNow;
+  }, [isMyTurnNow]);
+
+  useEffect(() => {
+    const base = "Cheque-games";
+    const update = () => {
+      document.title = isMyTurnNow && document.hidden ? "▶ Your turn! · Cheque-games" : base;
+    };
+
+    update();
+    document.addEventListener("visibilitychange", update);
+
+    return () => {
+      document.removeEventListener("visibilitychange", update);
+      document.title = base;
+    };
+  }, [isMyTurnNow]);
+
+  // New chat lines show as a bubble over whoever wrote them.
+  useEffect(() => {
+    const newest = view.chat.length > 0 ? view.chat[view.chat.length - 1].id : 0;
+
+    if (lastChat.current === null) {
+      lastChat.current = newest;
+
+      return;
+    }
+
+    const fresh = view.chat.filter(
+      (message) => message.id > (lastChat.current as number) && message.seatId !== null,
+    );
+
+    lastChat.current = newest;
+
+    if (fresh.length === 0) {
+      return;
+    }
+
+    setBubbles((current) => {
+      const next = { ...current };
+
+      for (const message of fresh) {
+        next[message.seatId as string] = { id: message.id, text: message.text };
+      }
+
+      return next;
+    });
+
+    if (fresh.some((message) => message.seatId !== view.you)) {
+      playSfx("chat");
+    }
+
+    const timer = setTimeout(
+      () =>
+        setBubbles((current) => {
+          const next = { ...current };
+
+          for (const message of fresh) {
+            if (next[message.seatId as string]?.id === message.id) {
+              delete next[message.seatId as string];
+            }
+          }
+
+          return next;
+        }),
+      BUBBLE_MS,
+    );
+
+    return () => clearTimeout(timer);
+  }, [view.chat, view.you]);
 
   function toast(text: string, tone: Toast["tone"]) {
     const id = (toastCount.current += 1);
@@ -270,16 +400,24 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
     }
 
     const current = viewRef.current;
-    const nameOf = (id: string) =>
+    const nameFor = (id: string) =>
       current.seats.find((seat) => seat.id === id)?.name ?? "Someone";
     const nextKey = () => `ghost-${(ghostCount.current += 1)}`;
     const made: Ghost[] = [];
     const stops: string[] = [];
+    const sounds = new Set<Sfx>();
     let cursor = 0;
 
     for (const move of fresh) {
-      if (move.type === "draw") {
+      if (move.type === "play") {
+        // Your own card already made its sound when you tapped it.
+        if (move.seatId !== current.you) {
+          sounds.add("play");
+        }
+      } else if (move.type === "draw") {
         const ghost = drawGhost(move, current.you, cursor, nextKey);
+
+        sounds.add("draw");
 
         if (ghost) {
           made.push(ghost);
@@ -288,23 +426,35 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
         cursor += move.forced ? PENALTY_STEP : 0.2;
       } else if (move.type === "reshuffle") {
         made.push(...mixGhosts(move, 0.45 + cursor, nextKey));
+        sounds.add("shuffle");
       } else if (move.type === "skip") {
         stops.push(move.seatId);
+        sounds.add("stop");
 
         if (move.seatId === current.you) {
           toast("You are stopped! Your turn is skipped.", "info");
         }
-      } else if (move.type === "check" && move.seatId !== current.you) {
-        toast(`${nameOf(move.seatId)} says CHECK!`, "check");
-      } else if (move.type === "games" && move.seatId !== current.you) {
-        toast(`${nameOf(move.seatId)} says GAMES! (${ordinal(move.rank)})`, "info");
+      } else if (move.type === "check") {
+        sounds.add("check");
+
+        if (move.seatId !== current.you) {
+          toast(`${nameFor(move.seatId)} says CHECK!`, "check");
+        }
+      } else if (move.type === "games") {
+        sounds.add("games");
+
+        if (move.seatId !== current.you) {
+          toast(`${nameFor(move.seatId)} says GAMES! (${ordinal(move.rank)})`, "info");
+        }
       } else if (move.type === "tie") {
         toast(
-          `Tie! ${move.seatIds.map(nameOf).join(" and ")} take ${move.cards} cards each`,
+          `Tie! ${move.seatIds.map(nameFor).join(" and ")} take ${move.cards} cards each`,
           "info",
         );
       }
     }
+
+    [...sounds].forEach((name, index) => setTimeout(() => playSfx(name), index * 110));
 
     if (made.length > 0) {
       setGhosts((existing) => [...existing, ...made]);
@@ -344,11 +494,23 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
   const iFinished = iAmPlaying && me?.rank != null && !game.over;
   const iAmSittingOut = iAmPlaying && (me?.sittingOut ?? false) && !game.over;
   const iAmWatching = !iAmPlaying || iFinished || iAmSittingOut;
-  const isMyTurn = isMyTurnNow && iAmPlaying;
+
+  // The card just played is already on the pile, and gone from the hand.
+  const playedCard = pending ? game.hand.find((card) => card.id === pending.cardId) : undefined;
+  const optimistic = pending && playedCard ? { card: playedCard, placement: pending.placement } : null;
+  const handCards: FanCard[] = optimistic
+    ? game.hand.filter((card) => card.id !== optimistic.card.id)
+    : game.hand;
+  const pileCards = optimistic
+    ? optimistic.placement === "under"
+      ? [...game.pile.slice(0, -1), optimistic.card, game.pile[game.pile.length - 1]]
+      : [...game.pile, optimistic.card]
+    : game.pile;
+
+  const isMyTurn = isMyTurnNow && iAmPlaying && !optimistic;
   const hasPlay = game.playableIds.length > 0;
   const currentName =
     view.seats.find((seat) => seat.id === game.currentSeatId)?.name ?? "Someone";
-  const handCards: FanCard[] = game.hand;
   /** On check: down to their last card (the table announces it by itself). */
   const onCheck = (seat: (typeof view.seats)[number]) =>
     !game.over &&
@@ -362,6 +524,7 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
     : [];
   const recent = game.log.slice(-3);
   const { tournament, settings } = view;
+  const canTake = game.canDraw && !optimistic && !drawing;
 
   async function run(action: ClientAction) {
     const error = await onAction(action);
@@ -369,6 +532,16 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
     if (error) {
       setNotice(error);
     }
+  }
+
+  async function takeCard() {
+    if (!canTake) {
+      return;
+    }
+
+    setDrawing(true);
+    await run({ type: "draw" });
+    setDrawing(false);
   }
 
   /** Where the card is on screen right now, so its flight starts from there. */
@@ -403,16 +576,29 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
 
     tapped.current = null;
 
+    // Show the card on the pile right now; the server's answer follows.
+    const allowed = game?.playableIds.includes(cardId) ?? false;
+
+    if (allowed) {
+      setPending({ cardId, placement: extra.placement ?? "top" });
+      playSfx("play");
+    }
+
     const error = await onAction({ cardId, type: "play", ...extra });
 
     if (error) {
       handOrigins.current.delete(cardId);
+      setPending(null);
       setNotice(error);
     }
   }
 
   /** A tap on a card. A 2 or a jack first asks what to do with it. */
   function playFromHand(card: FanCard) {
+    if (pending) {
+      return;
+    }
+
     tapped.current = { cardId: card.id, origin: captureOrigin(card.id) };
 
     const playable = game?.playableIds.includes(card.id) ?? false;
@@ -433,18 +619,26 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
     void sendPlay(card.id, {});
   }
 
+  playRef.current = playFromHand;
+
   /** Where a card that just landed on the pile came from, in screen coordinates. */
   function originFor(cardId: string): FlightOrigin | null {
     const move = game?.moves.find(
       (candidate): candidate is Extract<MoveView, { type: "play" }> =>
         candidate.type === "play" && candidate.card.id === cardId,
     );
+    // Cards played a moment ago have no move yet: they are still on their way to the server.
+    const fromMe = move ? move.seatId === view.you : pending?.cardId === cardId;
 
-    if (!move || typeof document === "undefined") {
+    if (!move && !fromMe) {
       return null;
     }
 
-    if (move.seatId === view.you) {
+    if (typeof document === "undefined") {
+      return null;
+    }
+
+    if (fromMe) {
       const saved = handOrigins.current.get(cardId);
 
       if (saved && Date.now() - saved.at < 6000) {
@@ -459,7 +653,7 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
         : null;
     }
 
-    const seat = queryBox(`[data-seat-card="${move.seatId}"]`);
+    const seat = queryBox(`[data-seat-card="${move?.seatId}"]`);
 
     return seat
       ? { rotate: 0, scale: seat.width / PILE_CARD_W, x: seat.x, y: seat.y }
@@ -467,6 +661,7 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
   }
 
   const penaltyForMe = isMyTurn && game.pending > 0;
+  const demandColour = game.demand ? (isRedSuit(game.demand) ? "red" : "black") : null;
 
   let hint = "";
 
@@ -476,6 +671,8 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
     hint = `Watching. ${currentName} is playing…`;
   } else if (iFinished) {
     hint = `You finished ${ordinal(me?.rank ?? 1)}. Watching the others.`;
+  } else if (optimistic) {
+    hint = "Played!";
   } else if (isMyTurn) {
     if (game.pending > 0) {
       hint = hasPlay
@@ -483,8 +680,8 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
         : `You have no 7 or joker. Take ${game.pending} cards from the bank.`;
     } else if (game.demand) {
       hint = hasPlay
-        ? `${game.demand} were asked for. Play one, a 2 or a J, or take a card.`
-        : `No ${game.demand}, 2 or J. Take a card from the bank.`;
+        ? `${game.demand} were asked for. Play one, a 2, a J or the ${demandColour} joker, or take a card.`
+        : `No ${game.demand}, 2, J or ${demandColour} joker. Take a card from the bank.`;
     } else {
       hint = hasPlay
         ? "Your turn. Play a card, or tap the bank to take one instead."
@@ -494,10 +691,12 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
     hint = `${currentName} is playing…`;
   }
 
+  const myBubble = bubbles[view.you];
+
   return (
     <div className="relative flex min-h-dvh flex-col overflow-hidden text-white">
       <style>{BLINK_CSS}</style>
-      <div className="flex items-center justify-between gap-3 px-4 py-3">
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 px-4 py-3">
         <div className="flex items-center gap-2">
           <span className="display rounded-full bg-black/25 px-4 py-1.5 text-sm tracking-widest">
             {view.code}
@@ -514,17 +713,20 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
             </span>
           ) : null}
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
           {connected ? null : (
             <span className="font-bold text-amber-300 text-xs">Reconnecting…</span>
           )}
+          <SoundButton />
+          <ChatButton onClick={() => setChatOpen(true)} unread={unread} />
+          <ReactionTray onSend={(emoji) => void onAction({ emoji, type: "react" })} />
           <button className={quietButton} onClick={onLeave} type="button">
             Leave
           </button>
         </div>
       </div>
 
-      <div className="flex flex-wrap justify-center gap-3 px-3 pt-2">
+      <div className="flex flex-wrap justify-center gap-3 px-3 pt-4">
         {others.map((seat, index) => (
           <div
             className={cn(
@@ -536,6 +738,7 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
               (!seat.inGame || seat.sittingOut) && "opacity-45",
             )}
             data-checked={onCheck(seat) ? "true" : "false"}
+            data-react-anchor={seat.id}
             data-seat={seat.id}
             key={seat.id}
           >
@@ -553,6 +756,14 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
               >
                 ▼
               </span>
+            ) : null}
+            {bubbles[seat.id] ? (
+              <div
+                className="pop -top-9 -translate-x-1/2 absolute left-1/2 z-40 w-max max-w-[170px] rounded-2xl bg-white px-3 py-1 text-center font-bold text-emerald-950 text-xs shadow-[0_3px_0_rgba(0,0,0,0.25)]"
+                data-bubble
+              >
+                <span className="line-clamp-2 break-words">{bubbles[seat.id].text}</span>
+              </div>
             ) : null}
             <div className="flex items-center gap-1.5">
               <span
@@ -676,16 +887,16 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
                   : "Take a card from the bank"
               }
               className={cn(
-                "rounded-[10px] transition-transform focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white",
-                game.canDraw
+                "rounded-[10px] transition-transform focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white active:scale-95",
+                canTake
                   ? hasPlay
                     ? "cursor-pointer ring-2 ring-white/60 hover:-translate-y-1"
                     : "cursor-pointer ring-4 ring-amber-300 hover:-translate-y-1"
                   : "cursor-default opacity-90",
               )}
               data-bank
-              disabled={!game.canDraw}
-              onClick={() => run({ type: "draw" })}
+              disabled={!canTake}
+              onClick={() => void takeCard()}
               type="button"
             >
               <PlayingCard faceDown rank="A" suit="spades" width={BANK_CARD_W} />
@@ -697,13 +908,17 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
               )}
               data-bank-label
             >
-              {penaltyForMe ? `Take ${game.pending}` : `Bank · ${game.bankCount}`}
+              {drawing
+                ? "Taking…"
+                : penaltyForMe
+                  ? `Take ${game.pending}`
+                  : `Bank · ${game.bankCount}`}
             </span>
           </div>
 
           <CentrePile
             cardWidth={PILE_CARD_W}
-            cards={game.pile}
+            cards={pileCards}
             originFor={originFor}
           />
         </div>
@@ -735,6 +950,9 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
                 {SUIT_SYMBOL[game.demand]}
               </span>
               {game.demand}
+              <span className="font-sans text-[11px] text-emerald-900/70 normal-case">
+                · {demandColour} joker ok
+              </span>
             </span>
           ) : null}
         </div>
@@ -772,6 +990,16 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
       </div>
 
       <div className="relative z-20 bg-gradient-to-t from-black/35 to-transparent">
+        {myBubble ? (
+          <div className="absolute inset-x-0 -top-10 z-[200] flex justify-center">
+            <div
+              className="pop max-w-[220px] rounded-2xl bg-amber-300 px-3 py-1 text-center font-bold text-emerald-950 text-xs shadow-[0_3px_0_rgba(0,0,0,0.25)]"
+              data-my-bubble
+            >
+              <span className="line-clamp-2 break-words">{myBubble.text}</span>
+            </div>
+          </div>
+        ) : null}
         {me && onCheck(me) ? (
           <div className="absolute inset-x-0 -top-2 z-[200] flex justify-center">
             <span
@@ -789,6 +1017,7 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
             !isMyTurn && !iAmWatching && "opacity-70",
           )}
           data-hand
+          data-react-anchor={view.you}
         >
           {iAmWatching ? (
             <div
@@ -819,7 +1048,7 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
               cards={handCards}
               dimmedIds={unplayable}
               hiddenIds={hiddenIds}
-              onPlay={playFromHand}
+              onPlay={onPlayStable}
               playedIds={NO_PLAYED}
             />
           )}
@@ -854,6 +1083,15 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
       {game.over ? (
         <ResultsOverlay onAction={(action) => void run(action)} onLeave={onLeave} view={view} />
       ) : null}
+
+      <ChatDrawer
+        messages={view.chat}
+        onClose={() => setChatOpen(false)}
+        onSend={sendChat}
+        open={chatOpen}
+        you={view.you}
+      />
+      <ReactionLayer nameOf={nameOf} reactions={view.reactions} you={view.you} />
     </div>
   );
 }

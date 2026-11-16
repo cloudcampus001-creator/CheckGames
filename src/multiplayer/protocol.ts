@@ -34,6 +34,80 @@ export type RoomSettings = {
   elimination: boolean;
 };
 
+// --- chat, stickers and votes ---------------------------------------------------
+
+/** Longest chat message, in characters. */
+export const CHAT_MAX_CHARS = 140;
+
+/**
+ * The stickers a player can throw at the table. Short words (all capitals and
+ * "!") are drawn as a badge, everything else as a big animated emoji.
+ */
+export const REACTIONS = [
+  "😂",
+  "😭",
+  "🔥",
+  "😎",
+  "👏",
+  "🤯",
+  "😡",
+  "🙏",
+  "❤️",
+  "🥶",
+  "💀",
+  "🤝",
+  "GG!",
+  "WOW!",
+  "OOPS!",
+  "FAST!",
+] as const;
+
+/** One-tap messages in the chat box. */
+export const QUICK_PHRASES = [
+  "Check! 😈",
+  "Play faster 😤",
+  "Nice one 👏",
+  "GG 🤝",
+  "Again!",
+  "Who took my card?!",
+] as const;
+
+/** A line in the chat. `seatId` is null for messages from the table itself. */
+export type ChatMessage = {
+  id: number;
+  seatId: string | null;
+  /** The name at the time, so it still reads right after someone leaves. */
+  name: string;
+  text: string;
+  at: number;
+};
+
+/** A sticker that was just thrown. `seq` counts up through the whole room. */
+export type ReactionEvent = { seq: number; seatId: string; emoji: string };
+
+export type VoteKind = "rules" | "kick" | "rematch";
+export type VoteTopic = "cards" | "jokers" | "ending";
+
+export type VoteView = {
+  id: number;
+  kind: VoteKind;
+  title: string;
+  /** Who started it. */
+  byId: string;
+  options: { id: string; label: string; count: number }[];
+  /** The option this viewer picked, or null. */
+  yourChoice: string | null;
+  /** This viewer is allowed to vote. */
+  canVote: boolean;
+  /** The one who started it, or the host, can call it off. */
+  canCancel: boolean;
+  /** Milliseconds left, when this view was made. */
+  endsInMs: number;
+  /** How many people may vote, and how many already did. */
+  voters: number;
+  voted: number;
+};
+
 export type SeatView = {
   id: string;
   name: string;
@@ -53,12 +127,19 @@ export type SeatView = {
   eliminated: boolean;
   /** Lost a tie: watches while the tied players play on. */
   sittingOut: boolean;
+  /** Pressed "ready" in the lobby. Bots are always ready. */
+  ready: boolean;
+  /** Sets won since this room was made. */
+  wins: number;
 };
 
 /** How many cards of the pile (newest on top) every player gets to see. */
 export const PILE_VISIBLE = 8;
 /** How many recent moves ride along with each update. */
 export const MOVES_WINDOW = 40;
+/** How many chat lines and stickers ride along with each update. */
+export const CHAT_WINDOW = 30;
+export const REACTIONS_WINDOW = 12;
 
 /**
  * Something that just happened at the table, for animations. `seq` counts up
@@ -155,6 +236,18 @@ export type RoomView = {
   seats: SeatView[];
   tournament: TournamentView;
   game: GameView | null;
+  /** The latest chat lines, oldest first. */
+  chat: ChatMessage[];
+  /** The latest stickers, oldest first. */
+  reactions: ReactionEvent[];
+  /** The vote that is running, or null. */
+  vote: VoteView | null;
+  /** After a set the table goes back to the lobby by itself. */
+  autoReturn: boolean;
+  /** Milliseconds until that happens (when this view was made), or null. */
+  returnInMs: number | null;
+  /** When it is a bot's turn: milliseconds until it moves (when this view was made). */
+  botInMs: number | null;
 };
 
 export type ClientAction =
@@ -168,6 +261,8 @@ export type ClientAction =
       endMode?: EndMode;
       elimination?: boolean;
     }
+  | { type: "setAutoReturn"; value: boolean }
+  | { type: "makeHost"; seatId: string }
   | { type: "start" }
   // host, during a game
   | { type: "replaceWithBot"; seatId: string }
@@ -180,4 +275,10 @@ export type ClientAction =
   | { type: "draw" }
   | { type: "check" }
   // everyone
-  | { type: "leave" };
+  | { type: "leave" }
+  | { type: "chat"; text: string }
+  | { type: "react"; emoji: string }
+  | { type: "ready"; ready: boolean }
+  | { type: "startVote"; kind: VoteKind; topic?: VoteTopic; seatId?: string }
+  | { type: "castVote"; choice: string }
+  | { type: "cancelVote" };
