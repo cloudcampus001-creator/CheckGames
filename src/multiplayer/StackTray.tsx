@@ -26,7 +26,7 @@ export function StackTray({
 }) {
   return (
     <div
-      className="pointer-events-none absolute inset-x-0 -top-[196px] z-[210] flex justify-center"
+      className="pointer-events-none absolute inset-x-0 bottom-[276px] z-[260] flex justify-center"
       data-stack
     >
       <div className={cn(shakeKey > 0 && "shake")} key={shakeKey}>

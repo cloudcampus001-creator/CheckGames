@@ -446,9 +446,12 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
         stops.push(move.seatId);
         sounds.add("stop");
 
-        if (move.seatId === current.you) {
-          toast("You are stopped! Your turn is skipped.", "info");
-        }
+        toast(
+          move.seatId === current.you
+            ? "You are stopped! Your turn is skipped."
+            : `${nameFor(move.seatId)} is stopped!`,
+          "info",
+        );
       } else if (move.type === "check") {
         sounds.add("check");
 
@@ -544,7 +547,6 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
       : isMyTurn
         ? game.hand.filter((card) => !game.playableIds.includes(card.id)).map((card) => card.id)
         : [];
-  const recent = game.log.slice(-3);
   const { tournament, settings } = view;
   const canTake = game.canDraw && !optimistic && !drawing;
 
@@ -1136,24 +1138,14 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
           ) : null}
         </div>
 
-        <div aria-live="polite" className="min-h-[60px] space-y-0.5 text-center text-sm">
-          {notice ? (
-            <p className="font-bold text-amber-300">{notice}</p>
-          ) : (
-            recent.map((line, index) => (
-              <p
-                className={
-                  index === recent.length - 1
-                    ? "font-semibold text-white"
-                    : "text-white/50"
-                }
-                key={`${recent.length - index}-${line}`}
-              >
-                {line}
-              </p>
-            ))
-          )}
-        </div>
+        {notice ? (
+          <p
+            aria-live="polite"
+            className="display pop max-w-xs rounded-full bg-rose-500/90 px-4 py-1.5 text-center text-sm shadow-[0_3px_0_rgba(0,0,0,0.25)]"
+          >
+            {notice}
+          </p>
+        ) : null}
 
         <p
           className={cn(
@@ -1169,15 +1161,6 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
       </div>
 
       <div className="relative z-20 bg-gradient-to-t from-black/35 to-transparent">
-        {stackCards.length > 0 ? (
-          <StackTray
-            cards={stackCards}
-            onCancel={() => setStack([])}
-            onPlay={playStack}
-            onRemove={(id) => setStack((current) => current.filter((other) => other !== id))}
-            shakeKey={shake}
-          />
-        ) : null}
         {myBubble ? (
           <div className="absolute inset-x-0 -top-10 z-[200] flex justify-center">
             <div
@@ -1243,6 +1226,16 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
           )}
         </div>
       </div>
+
+      {stackCards.length > 0 ? (
+        <StackTray
+          cards={stackCards}
+          onCancel={() => setStack([])}
+          onPlay={playStack}
+          onRemove={(id) => setStack((current) => current.filter((other) => other !== id))}
+          shakeKey={shake}
+        />
+      ) : null}
 
       <FlightLayer
         ghosts={ghosts}
