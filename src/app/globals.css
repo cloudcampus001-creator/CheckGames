@@ -16,6 +16,24 @@
   --sky: #38d6ff;
   --cream: #fff6dc;
   --ink: #052e1c;
+
+  /* The look the player chose (see prefs.ts); these are the defaults. */
+  --f-display: var(--f-lilita);
+  --f-body: var(--f-nunito);
+  --pattern: repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.04) 0 2px, transparent 2px 28px),
+    repeating-linear-gradient(-45deg, rgba(255, 255, 255, 0.04) 0 2px, transparent 2px 28px);
+  --pattern-size: auto, auto;
+  --card-bg: #ffffff;
+  --card-border: rgba(0, 0, 0, 0.1);
+  --suit-clubs: #23262d;
+  --suit-diamonds: #c22f2f;
+  --suit-hearts: #c22f2f;
+  --suit-spades: #23262d;
+  --back-color: #9d2c35;
+  --back-image: url("/experiments/card-back.png"),
+    repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.16) 0, rgba(255, 255, 255, 0.16) 1.5px, transparent 1.5px, transparent 7px),
+    repeating-linear-gradient(-45deg, rgba(255, 255, 255, 0.16) 0, rgba(255, 255, 255, 0.16) 1.5px, transparent 1.5px, transparent 7px);
+  --back-size: cover, auto, auto;
 }
 
 html {
@@ -50,16 +68,8 @@ body::before {
   pointer-events: none;
   background-image:
     radial-gradient(ellipse at center, transparent 50%, rgba(0, 24, 12, 0.42) 100%),
-    repeating-linear-gradient(
-      45deg,
-      rgba(255, 255, 255, 0.04) 0 2px,
-      transparent 2px 28px
-    ),
-    repeating-linear-gradient(
-      -45deg,
-      rgba(255, 255, 255, 0.04) 0 2px,
-      transparent 2px 28px
-    );
+    var(--pattern);
+  background-size: auto, var(--pattern-size);
 }
 
 /* The game font. Only has one weight, so never fake a bold on it. */
@@ -338,4 +348,86 @@ body::before {
     opacity: 0;
     transform: translate3d(-50%, -300%, 0) scale(1.2);
   }
+}
+
+/* Older phones without the new "dynamic" screen units. */
+.min-h-dvh {
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+/* "Fewer effects" in the profile: for slow phones. */
+[data-lite="true"] body::before,
+[data-lite="true"] .confetti {
+  display: none;
+}
+
+[data-lite="true"] .pop,
+[data-lite="true"] .react {
+  animation: none;
+}
+
+[data-lite="true"] .panel,
+[data-lite="true"] .btn {
+  box-shadow: none;
+}
+
+/* The big numbers counted out in the last seconds of a turn. */
+@keyframes count-pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+  30% {
+    opacity: 0.95;
+    transform: scale(1.18);
+  }
+  100% {
+    opacity: 0.85;
+    transform: scale(1);
+  }
+}
+
+.count-pop {
+  animation: count-pop 0.5s ease-out both;
+}
+
+/* A card stack that refuses a card shakes its head. */
+@keyframes shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20% {
+    transform: translateX(-9px) rotate(-2deg);
+  }
+  40% {
+    transform: translateX(9px) rotate(2deg);
+  }
+  60% {
+    transform: translateX(-6px) rotate(-1deg);
+  }
+  80% {
+    transform: translateX(6px) rotate(1deg);
+  }
+}
+
+.shake {
+  animation: shake 0.45s ease-in-out;
+}
+
+/* The search for a match. */
+@keyframes radar {
+  0% {
+    opacity: 0.8;
+    transform: scale(0.25);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.7);
+  }
+}
+
+.radar-ring {
+  animation: radar 2.4s ease-out infinite;
 }

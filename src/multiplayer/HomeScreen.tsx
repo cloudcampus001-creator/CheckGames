@@ -6,11 +6,13 @@ import { PlayingCard } from "@/components/PlayingCard";
 import {
   createRoomRequest,
   joinRoomRequest,
-  loadName,
   postAction,
   saveCreds,
-  saveName,
 } from "./api";
+import { ConnectionBanner } from "./ConnectionBanner";
+import { refreshProfile, saveProfile, useProfile } from "./identity";
+import { LeaderboardCard } from "./LeaderboardCard";
+import { ProfileBar } from "./ProfileBar";
 import { realtimeEnabled } from "./rt";
 import { inputClass, primaryButton, quietButton, Shell, skyButton } from "./ui";
 
@@ -48,6 +50,7 @@ function Hero() {
 
 export function HomeScreen() {
   const router = useRouter();
+  const { profile } = useProfile();
   const [name, setName] = useState("");
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
@@ -55,9 +58,17 @@ export function HomeScreen() {
   // Set when the server cannot keep games safely (see /api/health).
   const [storageWarning, setStorageWarning] = useState<string | null>(null);
 
+  // This device is a player: open (or make) its profile.
   useEffect(() => {
-    setName(loadName());
+    void refreshProfile();
   }, []);
+
+  useEffect(() => {
+    if (profile && !name) {
+      setName(profile.name);
+    }
+    // biome-ignore lint/correctness/useExhaustiveDependencies: only fill the name in once
+  }, [profile]);
 
   useEffect(() => {
     // With the realtime server the games live there, not in the website's storage.
@@ -83,10 +94,19 @@ export function HomeScreen() {
     };
   }, []);
 
+  /** The name is part of the profile: save it when it was changed. */
+  async function rememberName() {
+    const clean = name.trim();
+
+    if (clean && profile && clean !== profile.name) {
+      await saveProfile({ name: clean });
+    }
+  }
+
   async function createGame() {
     setBusy(true);
     setError(null);
-    saveName(name);
+    await rememberName();
 
     const result = await createRoomRequest(name);
 
@@ -105,7 +125,7 @@ export function HomeScreen() {
   async function practise() {
     setBusy(true);
     setError(null);
-    saveName(name);
+    await rememberName();
 
     const result = await createRoomRequest(name);
 
@@ -139,7 +159,7 @@ export function HomeScreen() {
   async function joinGame() {
     setBusy(true);
     setError(null);
-    saveName(name);
+    await rememberName();
 
     const result = await joinRoomRequest(code, name);
 
@@ -168,36 +188,56 @@ export function HomeScreen() {
         </p>
       </div>
 
-      <label className="block space-y-2">
-        <span className="font-bold text-sm text-white/80">Your name</span>
-        <input
-          autoComplete="nickname"
-          className={inputClass}
-          maxLength={16}
-          onChange={(event) => setName(event.target.value)}
-          placeholder="e.g. Amina"
-          value={name}
-        />
-      </label>
+      <ProfileBar />
+      <ConnectionBanner onRetry={() => void refreshProfile()} />
 
       <section className="panel space-y-3 p-5">
-        <h2 className="display text-2xl">Start a game</h2>
-        <p className="text-sm text-white/75">
-          You get a code to share. You choose the rules and add computer
-          players.
-        </p>
+        <h2 className="display text-2xl">Play</h2>
         <button
           className={`${primaryButton} w-full text-xl`}
+          data-play="online"
           disabled={busy}
-          onClick={createGame}
+          onClick={() => router.push("/online")}
           type="button"
         >
-          Create game
+          🌍 Play online
+        </button>
+        <p className="text-sm text-white/70">
+          The game finds real players for you and sets up the table.
+        </p>
+        <button
+          className={`${skyButton} w-full text-xl`}
+          data-play="computer"
+          disabled={busy}
+          onClick={practise}
+          type="button"
+        >
+          🤖 Play against the computer
         </button>
       </section>
 
       <section className="panel space-y-3 p-5">
-        <h2 className="display text-2xl">Join a game</h2>
+        <h2 className="display text-2xl">With friends</h2>
+        <label className="block space-y-1.5">
+          <span className="font-bold text-sm text-white/80">Your name</span>
+          <input
+            autoComplete="nickname"
+            className={inputClass}
+            maxLength={16}
+            onBlur={() => void rememberName()}
+            onChange={(event) => setName(event.target.value)}
+            placeholder="e.g. Amina"
+            value={name}
+          />
+        </label>
+        <button
+          className={`${quietButton} w-full`}
+          disabled={busy}
+          onClick={createGame}
+          type="button"
+        >
+          Create a private game
+        </button>
         <input
           aria-label="Game code"
           autoCapitalize="characters"
@@ -214,12 +254,12 @@ export function HomeScreen() {
           value={code}
         />
         <button
-          className={`${skyButton} w-full text-xl`}
+          className={`${quietButton} w-full`}
           disabled={busy || !canJoin}
           onClick={joinGame}
           type="button"
         >
-          Join game
+          Join with a code
         </button>
       </section>
 
@@ -235,20 +275,13 @@ export function HomeScreen() {
       {error ? (
         <p className="pop rounded-2xl border-2 border-rose-300/50 bg-rose-500/30 px-4 py-3 text-center font-semibold text-rose-50 text-sm">
           {error}
+          <button className="btn btn-soft mt-2 w-full" onClick={() => setError(null)} type="button">
+            Dismiss
+          </button>
         </p>
       ) : null}
 
-      <div className="space-y-2 text-center">
-        <p className="font-semibold text-sm text-white/70">Just want to practise?</p>
-        <button
-          className={quietButton}
-          disabled={busy}
-          onClick={practise}
-          type="button"
-        >
-          Play against 2 bots
-        </button>
-      </div>
+      <LeaderboardCard limit={5} />
     </Shell>
   );
 }

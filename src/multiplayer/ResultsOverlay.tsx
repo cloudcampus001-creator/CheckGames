@@ -1,13 +1,16 @@
 "use client";
 
 import { motion } from "motion/react";
+import { useRouter } from "next/navigation";
 import { useEffect, useRef } from "react";
 import { cn } from "@/helpers/classname-helper";
+import { refreshProfile } from "./identity";
+import { modeOf, ratingDelta, xpFor } from "./profile";
 import type { ClientAction, RoomView } from "./protocol";
 import { playSfx } from "./sound";
 import { primaryButton, quietButton } from "./ui";
 import { useCountdown } from "./useCountdown";
-import { StartVote, VoteCard } from "./VotePanel";
+import { CustomVoteForm, StartVote, VoteCard } from "./VotePanel";
 
 const ordinal = (n: number) => {
   const tens = n % 100;
@@ -66,6 +69,7 @@ export function ResultsOverlay({
   onLeave: () => void;
   view: RoomView;
 }) {
+  const router = useRouter();
   const game = view.game;
   const announced = useRef(false);
   const champion = view.tournament.championId;
@@ -84,6 +88,13 @@ export function ResultsOverlay({
     return () => clearTimeout(timer);
   }, [iWon]);
 
+  // The set was counted for your profile a moment after it ended: fetch the new numbers.
+  useEffect(() => {
+    const timer = setTimeout(() => void refreshProfile(), 1800);
+
+    return () => clearTimeout(timer);
+  }, []);
+
   if (!game) {
     return null;
   }
@@ -100,6 +111,17 @@ export function ResultsOverlay({
   const scores = view.seats
     .filter((seat) => seat.wins > 0)
     .sort((a, b) => b.wins - a.wins);
+
+  const me = view.seats.find((seat) => seat.id === view.you);
+  const myStanding = game.standings.find((entry) => entry.seatId === view.you);
+  const humans = view.seats.filter((seat) => seat.kind === "human").length;
+  const mode = modeOf(view.matchmade, humans);
+  const reward = me?.inGame
+    ? {
+        rating: ratingDelta({ left: false, mode, size: view.seats.filter((s) => s.inGame).length, won: game.winnerId === view.you }),
+        xp: xpFor({ left: false, mode, rank: myStanding?.rank ?? null, won: game.winnerId === view.you }),
+      }
+    : null;
 
   let title = "GAMES!";
   let subtitle = "";
@@ -189,6 +211,19 @@ export function ResultsOverlay({
         </ol>
       ) : null}
 
+      {reward ? (
+        <p className="display rounded-full bg-black/25 px-4 py-1.5 text-lg text-lime-300" data-reward>
+          +{reward.xp} XP
+          {reward.rating !== 0 ? (
+            <span className={reward.rating > 0 ? "text-lime-300" : "text-rose-300"}>
+              {" "}
+              · {reward.rating > 0 ? "+" : ""}
+              {reward.rating} rating
+            </span>
+          ) : null}
+        </p>
+      ) : null}
+
       {scores.length > 0 ? (
         <p className="flex flex-wrap justify-center gap-x-3 gap-y-1 text-sm text-white/75" data-scores>
           {scores.map((seat) => (
@@ -215,6 +250,12 @@ export function ResultsOverlay({
       {view.vote ? (
         <div className="w-full max-w-sm text-left">
           <VoteCard nameOf={nameOf} onAction={onAction} vote={view.vote} />
+        </div>
+      ) : null}
+
+      {isHost && !view.matchmade && !view.vote ? (
+        <div className="w-full max-w-sm text-left">
+          <CustomVoteForm onAction={onAction} />
         </div>
       ) : null}
 
@@ -256,9 +297,20 @@ export function ResultsOverlay({
         {!isHost || (!tournament.nextSetAvailable && !champion) ? (
           <StartVote onAction={onAction} view={view} />
         ) : null}
-        <button className={quietButton} onClick={onLeave} type="button">
-          Leave
-        </button>
+        {view.matchmade ? (
+          <button className={primaryButton} onClick={() => router.push("/online")} type="button">
+            Find a new match
+          </button>
+        ) : null}
+        {view.canLeave ? (
+          <button className={quietButton} onClick={onLeave} type="button">
+            Leave
+          </button>
+        ) : (
+          <p className="max-w-xs text-center text-white/60 text-xs" data-locked>
+            Nobody leaves after a game: play again, or go back to the lobby.
+          </p>
+        )}
       </div>
 
       {view.returnInMs !== null ? <BackToLobby ms={view.returnInMs} /> : null}

@@ -19,6 +19,7 @@ class Client {
   view: RoomView | null = null;
   views = 0;
   fatal: string | null = null;
+  events: Record<string, unknown>[] = [];
   private next = 1;
   private waiting = new Map<number, (reply: Reply) => void>();
   creds: { code: string; seatId: string; token: string } | null = null;
@@ -33,6 +34,8 @@ class Client {
         this.views += 1;
       } else if (data.t === "fatal") {
         this.fatal = String(data.error);
+      } else if (typeof data.t === "string") {
+        this.events.push(data);
       } else if (typeof data.id === "number") {
         this.waiting.get(data.id)?.(data as Reply);
         this.waiting.delete(data.id);
@@ -68,6 +71,25 @@ class Client {
     return this.request("watch", this.creds);
   }
 
+  /** Wait for a pushed message of this kind (matched, gain, queue...). */
+  async event(kind: string, ms = 5000) {
+    const started = Date.now();
+
+    for (;;) {
+      const found = this.events.find((event) => event.t === kind);
+
+      if (found) {
+        return found;
+      }
+
+      if (Date.now() - started > ms) {
+        throw new Error(`Timed out waiting for the ${kind} message`);
+      }
+
+      await sleep(2);
+    }
+  }
+
   async until(condition: (view: RoomView) => boolean, label: string, ms = 5000) {
     const started = Date.now();
 
@@ -89,6 +111,218 @@ async function connect(url: string) {
   await client.opened();
 
   return client;
+}
+
+/** Profiles, matchmaking, the turn clock and the rewards, over real WebSockets. */
+async function profilesAndMatches(url: string, running: { rooms: Map<string, unknown>; queue: { tickets: unknown[] } }) {
+  const x = await connect(url);
+  const y = await connect(url);
+  const idX = { profileId: "device-xxxxxxxx", secret: "secret-xxxxxxxx" };
+  const idY = { profileId: "device-yyyyyyyy", secret: "secret-yyyyyyyy" };
+
+  // each device is known as a player
+  const helloX = await x.request("profile", { ...idX, name: "Xavier" });
+  const helloY = await y.request("profile", { ...idY, name: "Yaya" });
+
+  assert.ok(helloX.ok && helloY.ok);
+  assert.equal((helloX.profile as { name: string }).name, "Xavier");
+  assert.equal((await x.request("profile", { ...idX, secret: "secret-wrongwrong" })).ok, false);
+
+  const renamed = await x.request("profile", { ...idX, op: "update", patch: { avatar: "🦁", name: "Xavi" } });
+
+  assert.ok(renamed.ok);
+  assert.equal((renamed.profile as { avatar: string }).avatar, "🦁");
+  assert.equal((await x.request("leaderboard")).ok, true);
+
+  // a private room remembers the device: its name comes from the profile, and it gets its seat back
+  const created = await x.request("create", { ...idX, name: "ignored" });
+
+  assert.ok(created.ok);
+
+  const code = String(created.code);
+  const joinedY = await y.request("join", { ...idY, code, name: "ignored" });
+
+  assert.ok(joinedY.ok);
+
+  const again = await y.request("join", { ...idY, code, name: "whatever" });
+
+  assert.equal(again.seatId, joinedY.seatId, "the same device gets the same seat, no token needed");
+  assert.equal(again.token, joinedY.token);
+
+  const watcher = await connect(url);
+
+  watcher.creds = { code, seatId: String(created.seatId), token: String(created.token) };
+  assert.ok((await watcher.watch()).ok);
+
+  const lobby = await watcher.until((v) => v.seats.length === 2, "two seats");
+
+  assert.deepEqual(lobby.seats.map((s) => s.name).sort(), ["Xavi", "Yaya"]);
+  assert.equal(lobby.seats.find((s) => s.name === "Xavi")?.avatar, "🦁");
+
+  // online: both ask for a duel with a short clock, and the system sets the table
+  const queueStart = Date.now();
+  const qx = await x.request("queueJoin", { ...idX, fillBots: false, sizes: [2], turn: 3 });
+  const qy = await y.request("queueJoin", { ...idY, fillBots: false, sizes: [2], turn: 3 });
+
+  assert.ok(qx.ok && qy.ok);
+
+  const matchX = await x.event("matched");
+  const matchY = await y.event("matched");
+
+  assert.ok(Date.now() - queueStart < 2500, "matched at once");
+  assert.equal(matchX.code, matchY.code);
+  assert.notEqual(matchX.seatId, matchY.seatId);
+  assert.equal(running.queue.tickets.length, 0, "both left the queue");
+
+  x.creds = { code: String(matchX.code), seatId: String(matchX.seatId), token: String(matchX.token) };
+  y.creds = { code: String(matchY.code), seatId: String(matchY.seatId), token: String(matchY.token) };
+  assert.ok((await x.watch()).ok && (await y.watch()).ok);
+
+  const started = await x.until((v) => v.phase === "playing", "the quick match is on");
+
+  assert.equal(started.matchmade, true);
+  assert.equal(started.turnSeconds, 3);
+  assert.ok(started.turnEndsInMs !== null && started.turnEndsInMs > 3000, "grace before the first turn");
+  assert.equal((await x.act({ type: "addBot" })).ok, false, "no host controls");
+
+  // nobody moves: the clock runs out and the table moves on (at the exact moment, nobody asked)
+  const clockStart = Date.now();
+
+  await x.until(
+    (v) => !!v.game && v.game.moves.some((m) => m.type === "timeout"),
+    "the clock ran out",
+    9000,
+  );
+  assert.ok(Date.now() - clockStart >= 2500 && Date.now() - clockStart < 8000, `a timeout after about 6 s (${Date.now() - clockStart} ms)`);
+
+  // now they play it out
+  const humans = [x, y];
+  const gameStart = Date.now();
+
+  while (x.view?.phase !== "finished") {
+    assert.ok(Date.now() - gameStart < 30_000, "the game should finish");
+
+    for (const human of humans) {
+      const game = human.view?.game;
+
+      if (!game || game.over || game.currentSeatId !== human.creds?.seatId) {
+        continue;
+      }
+
+      const playable = game.hand.find((card) => game.playableIds.includes(card.id));
+
+      await human.act(
+        playable
+          ? { cardId: playable.id, suit: playable.rank === "J" ? "hearts" : undefined, type: "play" }
+          : { type: "draw" },
+      );
+    }
+
+    await sleep(1);
+  }
+
+  // the result was counted and each player was told what they got
+  const gainX = (await x.event("gain")) as { gain: { xp: number }; profile: { stats: { played: number } } };
+  const gainY = (await y.event("gain")) as { gain: { xp: number }; profile: { stats: { played: number } } };
+
+  assert.ok(gainX.gain.xp >= 10 && gainY.gain.xp >= 10);
+  assert.equal(gainX.profile.stats.played, 1);
+  assert.equal(gainY.profile.stats.played, 1);
+  assert.ok(Math.abs(gainX.gain.xp - gainY.gain.xp) >= 25 - 8, "the winner got more");
+
+  const after = await x.request("profile", idX);
+
+  assert.equal((after.profile as { stats: { played: number; modes: { online: { played: number } } } }).stats.modes.online.played, 1);
+  assert.equal((await x.request("leaderboard")).ok, true);
+
+  // after a quick match nobody is held, and the room goes when the last one leaves
+  assert.equal(x.view?.canLeave, true);
+  assert.ok((await x.act({ type: "leave" })).ok);
+  assert.ok((await y.act({ type: "leave" })).ok);
+
+  for (const client of [x, y, watcher]) {
+    client.socket.close();
+  }
+}
+
+/** The same game over plain requests, for phones where WebSockets are blocked. */
+async function plainRequests(port: number) {
+  const base = `http://127.0.0.1:${port}`;
+  const rpc = async (sid: string, body: Record<string, unknown>) => {
+    const response = await fetch(`${base}/rpc?sid=${sid}`, {
+      body: JSON.stringify(body),
+      headers: { "content-type": "application/json", origin: "https://my-game.vercel.app" },
+      method: "POST",
+    });
+
+    return (await response.json()) as { reply: Record<string, unknown>; pushes: Record<string, unknown>[] };
+  };
+  const poll = async (sid: string) =>
+    ((await (await fetch(`${base}/poll?sid=${sid}`)).json()) as { pushes: Record<string, unknown>[] }).pushes;
+
+  // a browser's preflight is answered
+  const preflight = await fetch(`${base}/rpc?sid=session-aaaaaaaa`, { headers: { origin: "https://x.app" }, method: "OPTIONS" });
+
+  assert.equal(preflight.status, 204);
+  assert.equal(preflight.headers.get("access-control-allow-origin"), "*");
+  assert.match(preflight.headers.get("access-control-allow-headers") ?? "", /content-type/);
+  assert.equal((await fetch(`${base}/rpc?sid=x`, { body: "{}", method: "POST" })).status, 400, "a bad session id");
+
+  const a = "session-aaaaaaaa";
+  const b = "session-bbbbbbbb";
+  const created = await rpc(a, { id: 1, name: "Amina", type: "create" });
+
+  assert.ok(created.reply.ok);
+
+  const code = String(created.reply.code);
+  const creds = { code, seatId: created.reply.seatId, token: created.reply.token };
+  const watching = await rpc(a, { id: 2, type: "watch", ...creds });
+
+  assert.ok(watching.reply.ok);
+  assert.ok(
+    watching.pushes.some((push) => push.t === "view" && (push.view as { phase: string }).phase === "lobby"),
+    "the room comes back with the answer",
+  );
+
+  const joined = await rpc(b, { code, id: 1, name: "Paul", type: "join" });
+
+  assert.ok(joined.reply.ok);
+  assert.ok((await rpc(b, { code, id: 2, seatId: joined.reply.seatId, token: joined.reply.token, type: "watch" })).reply.ok);
+
+  // a long poll returns as soon as something happens
+  const started = Date.now();
+
+  assert.ok((await rpc(b, { action: { text: "hello over plain requests", type: "chat" }, code, id: 3, seatId: joined.reply.seatId, token: joined.reply.token, type: "act" })).reply.ok);
+
+  let heard = false;
+
+  for (let round = 0; round < 6 && !heard; round++) {
+    const pushed = await poll(a);
+
+    heard = pushed.some(
+      (push) =>
+        push.t === "view" &&
+        (push.view as { chat: { text: string }[] }).chat.some((m) => m.text === "hello over plain requests"),
+    );
+  }
+
+  assert.ok(heard, "Amina's page is told about Paul's message");
+  assert.ok(Date.now() - started < 2500, "and at once, not after the long wait");
+
+  // a poll with nothing to say waits, and a new event ends it
+  const quiet = poll(a);
+  const waitedFrom = Date.now();
+
+  await sleep(80);
+  await rpc(b, { action: { emoji: "🔥", type: "react" }, code, id: 4, seatId: joined.reply.seatId, token: joined.reply.token, type: "act" });
+  assert.ok((await quiet).length > 0);
+  assert.ok(Date.now() - waitedFrom < 1500, "a waiting poll is woken by the next change");
+
+  // a wrong token is final, like over a WebSocket
+  const refused = await rpc(a, { id: 9, type: "watch", code, seatId: creds.seatId, token: "wrong" });
+
+  assert.equal(refused.reply.ok, false);
+  assert.equal(refused.reply.fatal, true);
 }
 
 async function main() {
@@ -221,6 +455,8 @@ async function main() {
     client.socket.close();
   }
 
+  await profilesAndMatches(url, running);
+  await plainRequests(running.port);
   await running.close();
   console.log("All realtime checks passed.");
 }

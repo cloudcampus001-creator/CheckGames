@@ -1,26 +1,23 @@
 HOW TO UPDATE
 =============
-1. Unzip this folder over your cheque-games project (same folders). Your computer will
-   ask to replace files: say yes to all. Nothing has to be deleted.
-2. Run:  npm install      (tsx moved to the normal dependencies)
-3. Run:  npm test         (optional: checks the rules and the server)
+1. Unzip this folder over your cheque-games project (same folders). Say yes to replace everything.
+   Nothing has to be deleted.
+2. Run:  npm install
+3. Run:  npm test            (optional)
 4. Run:  npm run dev
 
-NEW FILES
-  realtime/ws.ts, realtime/server.ts, realtime/start.ts, realtime/realtime.test.ts
-  src/server/social.ts, src/server/social.test.ts
-  src/multiplayer/rt.ts, sound.ts, useCountdown.ts, Dock.tsx, Chat.tsx, Reactions.tsx, VotePanel.tsx
-  .env.example
+NEW FOR EVERYBODY
+  - Profiles (name, face, level, stats, badges, rating), leaderboard, "Play online" matchmaking.
+  - Turn clock chosen by the host, host can remove players in a game, nobody leaves after a game,
+    host-written votes, DOUBLING (2-4 cards of the same number together), and a customisable look.
+  - Fixes: A as the last card with 2 players; the red/black joker after a Jack.
 
-REPLACED FILES
-  package.json, README.md
-  src/app/globals.css, src/app/layout.tsx
-  src/cheque-games/engine.ts, engine.test.ts
-  src/server/rooms.ts, service.ts
-  src/components/PlayingCardFan.tsx
-  src/multiplayer/protocol.ts, api.ts, useRoom.ts, CentrePile.tsx, Choosers.tsx, HomeScreen.tsx,
-  Lobby.tsx, ResultsOverlay.tsx, RoomScreen.tsx, Table.tsx, ui.tsx
-
-FOR REAL REALTIME (very recommended)
-  See "Make it truly realtime" in README.md:
-  run  npm run realtime  and set NEXT_PUBLIC_REALTIME_URL (see .env.example).
+ON RENDER (realtime server) - IMPORTANT
+  - Push these files and let Render redeploy.
+  - "Could not reach the game server" on some phones: the game now falls back by itself to plain
+    requests (for networks that block WebSockets) and shows "Waking up the game server..." while a
+    sleeping free server wakes up. Use the https:// address in NEXT_PUBLIC_REALTIME_URL, then redeploy Vercel.
+  - To keep profiles and the leaderboard for good, add the Upstash variables on Render
+    (UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN), see .env.example.
+  - To avoid the wake-up wait, keep it awake with a free pinger (cron-job.org every 10 minutes
+    calling your Render address).

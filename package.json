@@ -1,13 +1,13 @@
 {
   "name": "cheque-games",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "scripts": {
     "dev": "next dev -H 0.0.0.0",
     "build": "next build",
     "start": "next start -H 0.0.0.0",
     "realtime": "tsx realtime/start.ts",
-    "test": "tsx src/cheque-games/engine.test.ts && tsx src/server/rooms.test.ts && tsx src/server/social.test.ts && tsx src/server/routes.test.ts && tsx src/server/service.test.ts && tsx realtime/realtime.test.ts"
+    "test": "tsx src/cheque-games/engine.test.ts && tsx src/server/rooms.test.ts && tsx src/server/social.test.ts && tsx src/server/matchmaking.test.ts && tsx src/server/profiles.test.ts && tsx src/server/matchService.test.ts && tsx src/server/routes.test.ts && tsx src/server/service.test.ts && tsx realtime/realtime.test.ts"
   },
   "dependencies": {
     "clsx": "latest",

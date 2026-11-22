@@ -4,10 +4,19 @@ import { useCallback, useEffect, useState } from "react";
 import { cn } from "@/helpers/classname-helper";
 import { ChatBox } from "./Chat";
 import { SoundButton } from "./Dock";
-import { type ClientAction, MAX_SEATS, MIN_SEATS, type RoomView } from "./protocol";
+import { levelInfo } from "./profile";
+import {
+  type ClientAction,
+  MAX_SEATS,
+  MIN_SEATS,
+  type RoomView,
+  TIMER_CHOICES,
+  TIMER_MAX,
+  TIMER_MIN,
+} from "./protocol";
 import { ReactionLayer, ReactionTray } from "./Reactions";
 import { copyText, inputClass, primaryButton, quietButton, Stepper } from "./ui";
-import { StartVote, VoteCard } from "./VotePanel";
+import { CustomVoteForm, StartVote, VoteCard } from "./VotePanel";
 
 type LobbyProps = {
   connected: boolean;
@@ -32,6 +41,7 @@ export function Lobby({ connected, onAction, onLeave, view }: LobbyProps) {
   const [isLocalAddress, setIsLocalAddress] = useState(false);
   const [copied, setCopied] = useState<"code" | "link" | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [customSeconds, setCustomSeconds] = useState("20");
 
   useEffect(() => {
     setShareUrl(`${window.location.origin}/room/${view.code}`);
@@ -195,15 +205,20 @@ export function Lobby({ connected, onAction, onLeave, view }: LobbyProps) {
                 <div className="flex min-w-0 items-center gap-3">
                   <span
                     className={cn(
-                      "display flex size-9 shrink-0 items-center justify-center rounded-full text-lg shadow-[0_3px_0_rgba(0,0,0,0.25)]",
+                      "flex size-9 shrink-0 items-center justify-center rounded-full text-xl shadow-[0_3px_0_rgba(0,0,0,0.25)]",
                       seat.kind === "bot"
                         ? "bg-white/20 text-white"
                         : cn(AVATARS[index % AVATARS.length], "text-emerald-950"),
                     )}
                   >
-                    {seat.kind === "bot" ? "AI" : seat.name.slice(0, 1).toUpperCase()}
+                    {seat.avatar}
                   </span>
                   <span className="truncate font-bold">{seat.name}</span>
+                  {seat.kind === "human" ? (
+                    <span className="display shrink-0 rounded-full bg-white/10 px-2 py-0.5 text-[10px]">
+                      Lv {levelInfo(seat.xp).level}
+                    </span>
+                  ) : null}
                   {seat.id === view.you ? (
                     <span className="text-white/55 text-xs">you</span>
                   ) : null}
@@ -318,6 +333,64 @@ export function Lobby({ connected, onAction, onLeave, view }: LobbyProps) {
             />
           </div>
 
+          <div className="space-y-2" data-timer>
+            <p className="font-semibold text-white/90">Time to play a card</p>
+            <div className="flex flex-wrap gap-2">
+              {TIMER_CHOICES.map((seconds) => (
+                <button
+                  className={cn("btn px-4 py-2 text-sm", view.turnSeconds === seconds ? "btn-gold" : "btn-soft")}
+                  disabled={!isHost}
+                  key={seconds}
+                  onClick={() => run({ seconds, type: "setTimer" })}
+                  type="button"
+                >
+                  {seconds === 0 ? "Off" : `${seconds}s`}
+                </button>
+              ))}
+            </div>
+            {isHost ? (
+              <div className="flex items-center gap-2">
+                <input
+                  aria-label="Custom seconds"
+                  className={cn(inputClass, "w-24 py-2 text-center")}
+                  inputMode="numeric"
+                  max={TIMER_MAX}
+                  min={TIMER_MIN}
+                  onChange={(event) => setCustomSeconds(event.target.value.replace(/\D/g, "").slice(0, 3))}
+                  value={customSeconds}
+                />
+                <button
+                  className={cn("btn px-4 py-2 text-sm", ![...TIMER_CHOICES].includes(view.turnSeconds as never) ? "btn-gold" : "btn-soft")}
+                  onClick={() => run({ seconds: Number(customSeconds), type: "setTimer" })}
+                  type="button"
+                >
+                  Custom
+                </button>
+              </div>
+            ) : null}
+            <p className="text-white/60 text-xs">
+              {view.turnSeconds === 0
+                ? "No clock: everybody plays at their own pace."
+                : `${view.turnSeconds} seconds each turn. The last 5 seconds are counted out on the screen. When time runs out the player takes a card and the turn passes on. After 3 times in a row the table plays for them until they are back.`}
+            </p>
+          </div>
+
+          <div className="flex items-center justify-between gap-4" data-doubling>
+            <div>
+              <p className="font-semibold text-white/90">Doubling</p>
+              <p className="text-white/60 text-xs">
+                Play 2 to 4 cards of the same number together. The bottom card must match the centre card; hold a card
+                to lift it, tap the others to add them, then drop them on the table.
+              </p>
+            </div>
+            <Switch
+              checked={view.doubling}
+              disabled={!isHost}
+              label="Doubling"
+              onChange={(value) => run({ type: "setDoubling", value })}
+            />
+          </div>
+
           <div className="space-y-2">
             <p className="font-semibold text-white/90">When someone plays their last card</p>
             <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="How a set ends">
@@ -375,6 +448,7 @@ export function Lobby({ connected, onAction, onLeave, view }: LobbyProps) {
           </div>
 
           <StartVote onAction={(action) => void run(action)} view={view} />
+          {isHost ? <CustomVoteForm onAction={(action) => void run(action)} /> : null}
 
           <details className="rounded-2xl bg-black/20 px-4 py-3 text-sm text-white/75">
             <summary className="cursor-pointer font-bold text-white/90">

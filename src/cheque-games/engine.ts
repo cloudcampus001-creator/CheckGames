@@ -35,6 +35,14 @@
  *           colour (red joker for hearts/diamonds, black joker for
  *           clubs/spades). The request stays until a card lands on top.
  *
+ * Doubling (optional, the host switches it on)
+ *  - Two to four cards of the same number or letter (and different signs)
+ *    can be played together. The one you put down first (the bottom) must be
+ *    playable on the centre card; the others go on top of it in the order you
+ *    choose, and the last one becomes the centre card. Their effects add up: two
+ *    7s make the next player take 4, two aces stop two players, two jacks ask
+ *    for one sign. Jokers and a 2 played "under" are always played alone.
+ *
  * How a set ends
  *  - "first":   when a player goes out, the others still play the rest of
  *               that round. If only one player went out, they win. If two or
@@ -103,7 +111,9 @@ export type GameEvent =
   /** Several players went out in the same round: each takes `cards` and the play-off goes on. */
   | { type: "tie"; playerIds: string[]; cards: number }
   /** Nobody can move any more. */
-  | { type: "stalemate" };
+  | { type: "stalemate" }
+  /** A player ran out of time: the table moved on for them. */
+  | { type: "timeout"; playerId: string };
 
 export type GameState = {
   players: Player[];
@@ -134,6 +144,8 @@ export type GameState = {
   roundStart?: number;
   /** Events dropped from the front of `events` to keep the state small. */
   eventBase?: number;
+  /** Several cards of the same number may be played together. */
+  doubling?: boolean;
 };
 
 export type Rng = () => number;
@@ -147,6 +159,8 @@ export type CreateGameOptions = {
   playerIds?: readonly string[];
   /** Pick a random player to go first instead of the first one. */
   randomStart?: boolean;
+  /** Allow playing 2 to 4 cards of the same number together. */
+  doubling?: boolean;
   rng?: Rng;
 };
 
@@ -238,6 +252,7 @@ export function maxCardsPerPlayer(playerCount: number, includeJokers = false) {
 
 export function createGame({
   cardsPerPlayer,
+  doubling = false,
   includeJokers = false,
   mode = "first",
   playerIds,
@@ -294,6 +309,7 @@ export function createGame({
     eventBase: 0,
     roundStart: start,
     demand: null,
+    doubling,
     events: [{ type: "start" }],
     finished: [],
     mode,
@@ -547,7 +563,7 @@ function settleTie(state: GameState, rng: Rng): GameState {
 function passTurn(
   state: GameState,
   from: number,
-  skipNext: boolean,
+  skipCount: number,
   rng: Rng,
 ): GameState {
   const { players } = state;
@@ -557,7 +573,7 @@ function passTurn(
   let current = nextActive(players, out, from);
   let travelled = distance(from, current, count);
 
-  if (skipNext) {
+  for (let stopped = 0; stopped < skipCount; stopped++) {
     events.push({ playerId: players[current].id, type: "skip" });
 
     const after = nextActive(players, out, current);
@@ -593,6 +609,21 @@ export function playCard(
   cardId: string,
   options: PlayOptions = {},
 ): Result {
+  return playCards(state, playerId, [cardId], options);
+}
+
+/**
+ * Play one card, or (when doubling is on) 2 to 4 cards of the same number
+ * together. `cardIds` is in the order they go down: the first is the bottom of
+ * the stack and the one that must match the centre card; the last ends up on
+ * top and is the new centre card.
+ */
+export function playCards(
+  state: GameState,
+  playerId: string,
+  cardIds: readonly string[],
+  options: PlayOptions = {},
+): Result {
   const turnError = checkTurn(state, playerId);
 
   if (turnError) {
@@ -600,19 +631,65 @@ export function playCard(
   }
 
   const player = state.players[state.current];
-  const card = player.hand.find((candidate) => candidate.id === cardId);
+  const many = cardIds.length;
 
-  if (!card) {
-    return fail("You do not have that card.");
+  if (many < 1) {
+    return fail("Choose a card to play.");
   }
 
+  if (new Set(cardIds).size !== many) {
+    return fail("Pick each card only once.");
+  }
+
+  const cards: Card[] = [];
+
+  for (const id of cardIds) {
+    const found = player.hand.find((candidate) => candidate.id === id);
+
+    if (!found) {
+      return fail("You do not have that card.");
+    }
+
+    cards.push(found);
+  }
+
+  // The card that goes down first: for a stack, the one that has to match the centre card.
+  const card = cards[0];
   const context = playContext(state);
 
   if (!isPlayable(card, context)) {
-    return fail(whyNot(card, context));
+    const reason = whyNot(card, context);
+
+    return fail(
+      many > 1 && reason === "That card does not match the centre card."
+        ? "The bottom card must match the centre card."
+        : reason,
+    );
+  }
+
+  if (many > 1) {
+    if (!state.doubling) {
+      return fail("Doubling is not allowed at this table.");
+    }
+
+    if (many > 4) {
+      return fail("You can play at most 4 cards together.");
+    }
+
+    if (cards.some((candidate) => isJoker(candidate))) {
+      return fail("Jokers are played alone.");
+    }
+
+    if (cards.some((candidate) => candidate.rank !== card.rank)) {
+      return fail("Cards played together need the same number or letter.");
+    }
   }
 
   const placement: Placement = options.placement ?? "top";
+
+  if (placement === "under" && many > 1) {
+    return fail("Cards played together always go on top.");
+  }
 
   if (placement === "under" && card.rank !== "2") {
     return fail("Only a 2 can go under the centre card.");
@@ -622,7 +699,7 @@ export function playCard(
     return fail("Choose a sign for the jack.");
   }
 
-  const hand = player.hand.filter((candidate) => candidate.id !== cardId);
+  const hand = player.hand.filter((candidate) => !cardIds.includes(candidate.id));
   const players = state.players.map((candidate) =>
     candidate.id === playerId ? { ...candidate, hand } : candidate,
   );
@@ -630,40 +707,49 @@ export function playCard(
   const pile = [...state.pile];
   let pending = state.pending;
   let demand = state.demand;
-  let skipNext = false;
+  let stops = 0;
   let askedFor: Suit | null = null;
 
   if (placement === "under") {
     // Slides under the centre card: the centre card, and any request, stay.
     pile.splice(pile.length - 1, 0, card);
   } else {
-    pile.push(card);
+    pile.push(...cards);
     demand = null;
 
     if (card.rank === "J") {
       askedFor = options.suit as Suit;
       demand = askedFor;
     } else if (card.rank === "7") {
-      pending += 2;
+      pending += 2 * many;
     } else if (isJoker(card)) {
       pending += 4;
     } else if (card.rank === "A") {
-      skipNext = true;
+      stops = many;
     }
   }
 
-  events.push({ card, demand: askedFor, placement, playerId, type: "play" });
+  cards.forEach((played, index) => {
+    events.push({
+      card: played,
+      demand: index === many - 1 ? askedFor : null,
+      placement,
+      playerId,
+      type: "play",
+    });
+  });
 
   const checked = state.checked.filter((id) => id !== playerId);
   let finished = state.finished;
   let winner = state.winner;
   let over = false;
 
-  // With only two players left, an ace stops the other one and the turn comes
-  // straight back to you. With no card in hand you would have to take one, so
-  // the ace cannot be the card that wins the game.
-  const aceStopsAtTheEnd =
-    hand.length === 0 && skipNext && activePlayers(state).length === 2;
+  // Aces stop the next players. When that is everybody else, the turn comes
+  // straight back to you: with no card in hand you would have to take one, so
+  // the ace(s) cannot be what wins the game.
+  const others = activePlayers(state).length - 1;
+  const skipCount = Math.min(stops, others);
+  const aceStopsAtTheEnd = hand.length === 0 && stops > 0 && others > 0 && stops >= others;
 
   if (hand.length === 1) {
     // Down to one card: on check. Everybody is told, no button needed.
@@ -726,7 +812,7 @@ export function playCard(
       winner,
     },
     state.current,
-    skipNext,
+    skipCount,
     rng,
   );
 
@@ -883,7 +969,7 @@ export function drawCard(
       stalled: taken === 0 ? state.stalled + 1 : 0,
     },
     state.current,
-    false,
+    0,
     rng,
   );
 
@@ -970,19 +1056,31 @@ export function botTurn(state: GameState, rng: Rng = Math.random): GameState {
 
   const card = plays[Math.floor(rng() * plays.length)];
   const options: PlayOptions = {};
+  let ids = [card.id];
+
+  // With doubling on, a bot sometimes plays its matching cards together too.
+  if (state.doubling && isStandard(card) && rng() < 0.35) {
+    const same = player.hand.filter((other) => other.id !== card.id && other.rank === card.rank);
+
+    if (same.length > 0) {
+      const extra = same.slice(0, 1 + Math.floor(rng() * same.length));
+
+      ids = [card.id, ...extra.map((other) => other.id)];
+    }
+  }
 
   if (card.rank === "J") {
     options.suit = bestSuit(
-      player.hand.filter((other) => other.id !== card.id),
+      player.hand.filter((other) => !ids.includes(other.id)),
       rng,
     );
   }
 
-  if (card.rank === "2") {
+  if (card.rank === "2" && ids.length === 1) {
     options.placement = rng() < 0.3 ? "under" : "top";
   }
 
-  const played = playCard(state, player.id, card.id, { ...options, rng });
+  const played = playCards(state, player.id, ids, { ...options, rng });
 
   if (!played.ok) {
     return draw();
@@ -1007,5 +1105,73 @@ export function trimEvents(state: GameState, keep = 80): GameState {
     ...state,
     eventBase: (state.eventBase ?? 0) + drop,
     events: state.events.slice(drop),
+  };
+}
+
+/**
+ * Take a player out of a game that is going on (the host removed them). Their
+ * cards go back into the bank, mixed. Whoever was next after them is up. If
+ * only one player is left, that player wins and the set is over.
+ */
+export function removePlayer(
+  state: GameState,
+  playerId: string,
+  rng: Rng = Math.random,
+): GameState {
+  const index = state.players.findIndex((player) => player.id === playerId);
+
+  if (index === -1 || state.over) {
+    return state;
+  }
+
+  const leaving = state.players[index];
+  const players = state.players.filter((player) => player.id !== playerId);
+  const shift = (seat: number) => (seat > index ? seat - 1 : seat);
+  const wasCurrent = state.current === index;
+  let current = wasCurrent ? index : shift(state.current);
+
+  if (current >= players.length) {
+    current = 0;
+  }
+
+  const roundStart =
+    state.roundStart === undefined
+      ? undefined
+      : state.roundStart === index
+        ? current
+        : shift(state.roundStart);
+  let finished = state.finished.filter((id) => id !== playerId);
+  const benched = (state.benched ?? []).filter((id) => id !== playerId);
+  const base: GameState = {
+    ...state,
+    bank: shuffle([...state.bank, ...leaving.hand], rng),
+    benched,
+    checked: state.checked.filter((id) => id !== playerId),
+    current,
+    finished,
+    // An attack aimed at the player who left does not fall on the next one.
+    pending: wasCurrent ? 0 : state.pending,
+    players,
+    roundStart,
+    stalled: 0,
+  };
+  const active = activePlayers(base);
+
+  if (active.length > 1) {
+    return base;
+  }
+
+  // One player (or none) is left: the set is over.
+  const last = active[0]?.id;
+
+  if (last && !finished.includes(last)) {
+    finished = [...finished, last];
+  }
+
+  return {
+    ...base,
+    finished,
+    over: true,
+    winner: base.winner === playerId ? (finished[0] ?? null) : (base.winner ?? finished[0] ?? null),
   };
 }

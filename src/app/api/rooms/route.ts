@@ -5,16 +5,16 @@ export const runtime = "nodejs";
 
 /** Start a new game. The caller becomes the host. */
 export async function POST(request: Request) {
-  let name: unknown;
+  let body: { name?: unknown; profileId?: unknown; secret?: unknown } = {};
 
   try {
-    name = ((await request.json()) as { name?: unknown }).name;
+    body = (await request.json()) as typeof body;
   } catch {
     // no body: fall back to the default host name
   }
 
   try {
-    const result = await createRoom(name);
+    const result = await createRoom(body.name, { id: body.profileId, secret: body.secret });
 
     return Response.json(result, { status: result.ok ? 200 : result.status });
   } catch (error) {

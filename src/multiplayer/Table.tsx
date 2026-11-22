@@ -21,6 +21,8 @@ import { FlightLayer, type Ghost } from "./FlightLayer";
 import type { ClientAction, MoveView, RoomView } from "./protocol";
 import { ReactionLayer, ReactionTray } from "./Reactions";
 import { ResultsOverlay } from "./ResultsOverlay";
+import { StackTray } from "./StackTray";
+import { TurnClock } from "./TurnClock";
 import { buzz, playSfx, type Sfx } from "./sound";
 import { quietButton } from "./ui";
 
@@ -34,7 +36,7 @@ type TableProps = {
 type Toast = { id: number; text: string; tone: "check" | "info" };
 
 /** A card the player just played, shown on the pile before the server has answered. */
-type Pending = { cardId: string; placement: Placement };
+type Pending = { cardIds: string[]; placement: Placement };
 
 // Card sizes in pixels.
 const PILE_CARD_W = 112;
@@ -203,6 +205,10 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
   const [pending, setPending] = useState<Pending | null>(null);
   const [drawing, setDrawing] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
+  // Doubling: the cards lifted out of the hand to be played together (bottom first).
+  const [stack, setStack] = useState<string[]>([]);
+  const [shake, setShake] = useState(0);
+  const [confirmKick, setConfirmKick] = useState<string | null>(null);
   const [bubbles, setBubbles] = useState<Record<string, { id: number; text: string }>>({});
   // Where the player's own cards were on screen when they were played.
   const handOrigins = useRef(
@@ -219,6 +225,8 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
   // The fan is only redrawn when its cards change, so it gets one function that never changes.
   const playRef = useRef<(card: FanCard) => void>(() => {});
   const onPlayStable = useCallback((card: FanCard) => playRef.current(card), []);
+  const holdRef = useRef<(card: FanCard) => void>(() => {});
+  const onHoldStable = useCallback((card: FanCard) => holdRef.current(card), []);
 
   viewRef.current = view;
 
@@ -255,10 +263,17 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
   // A played card shows on the pile at once. It stays that way until the
   // server's table has the card (it is gone from the hand), or the move failed.
   useEffect(() => {
-    if (pending && !(game?.hand.some((card) => card.id === pending.cardId) ?? false)) {
+    if (pending && !pending.cardIds.some((id) => game?.hand.some((card) => card.id === id))) {
       setPending(null);
     }
   }, [pending, game?.hand]);
+
+  // A lifted stack only makes sense on your own turn.
+  useEffect(() => {
+    if (stack.length > 0 && !isMyTurnNow) {
+      setStack([]);
+    }
+  }, [stack, isMyTurnNow]);
 
   useEffect(() => {
     if (!pending) {
@@ -496,16 +511,20 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
   const iAmWatching = !iAmPlaying || iFinished || iAmSittingOut;
 
   // The card just played is already on the pile, and gone from the hand.
-  const playedCard = pending ? game.hand.find((card) => card.id === pending.cardId) : undefined;
-  const optimistic = pending && playedCard ? { card: playedCard, placement: pending.placement } : null;
-  const handCards: FanCard[] = optimistic
-    ? game.hand.filter((card) => card.id !== optimistic.card.id)
-    : game.hand;
+  const playedCards = pending
+    ? pending.cardIds.flatMap((id) => game.hand.filter((card) => card.id === id))
+    : [];
+  const optimistic =
+    pending && playedCards.length > 0 ? { cards: playedCards, placement: pending.placement } : null;
+  const stackCards = stack.flatMap((id) => game.hand.filter((card) => card.id === id));
+  const liftedIds = new Set([...stack, ...(optimistic?.cards.map((card) => card.id) ?? [])]);
+  const handCards: FanCard[] = game.hand.filter((card) => !liftedIds.has(card.id));
   const pileCards = optimistic
     ? optimistic.placement === "under"
-      ? [...game.pile.slice(0, -1), optimistic.card, game.pile[game.pile.length - 1]]
-      : [...game.pile, optimistic.card]
+      ? [...game.pile.slice(0, -1), ...optimistic.cards, game.pile[game.pile.length - 1]]
+      : [...game.pile, ...optimistic.cards]
     : game.pile;
+  const stackRank = stackCards[0]?.rank ?? null;
 
   const isMyTurn = isMyTurnNow && iAmPlaying && !optimistic;
   const hasPlay = game.playableIds.length > 0;
@@ -519,9 +538,12 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
     !seat.sittingOut &&
     (seat.checked || seat.handCount === 1);
   const hiddenIds = ghosts.flatMap((ghost) => (ghost.revealId ? [ghost.revealId] : []));
-  const unplayable = isMyTurn
-    ? game.hand.filter((card) => !game.playableIds.includes(card.id)).map((card) => card.id)
-    : [];
+  const unplayable =
+    stackRank !== null
+      ? handCards.filter((card) => card.rank !== stackRank).map((card) => card.id)
+      : isMyTurn
+        ? game.hand.filter((card) => !game.playableIds.includes(card.id)).map((card) => card.id)
+        : [];
   const recent = game.log.slice(-3);
   const { tournament, settings } = view;
   const canTake = game.canDraw && !optimistic && !drawing;
@@ -566,36 +588,132 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
   async function sendPlay(
     cardId: string,
     extra: { placement?: Placement; suit?: Suit },
+    stackIds?: string[],
   ) {
-    const origin =
-      tapped.current?.cardId === cardId ? tapped.current.origin : captureOrigin(cardId);
+    const ids = stackIds && stackIds.length > 1 ? stackIds : [cardId];
 
-    if (origin) {
-      handOrigins.current.set(cardId, { at: Date.now(), origin });
+    for (const id of ids) {
+      const origin =
+        ids.length === 1 && tapped.current?.cardId === id ? tapped.current.origin : captureOrigin(id);
+
+      if (origin) {
+        handOrigins.current.set(id, { at: Date.now(), origin });
+      }
     }
 
     tapped.current = null;
 
-    // Show the card on the pile right now; the server's answer follows.
+    // Show the card(s) on the pile right now; the server's answer follows.
     const allowed = game?.playableIds.includes(cardId) ?? false;
 
     if (allowed) {
-      setPending({ cardId, placement: extra.placement ?? "top" });
+      setPending({ cardIds: ids, placement: extra.placement ?? "top" });
+      setStack([]);
       playSfx("play");
     }
 
-    const error = await onAction({ cardId, type: "play", ...extra });
+    const error = await onAction({
+      cardId,
+      type: "play",
+      ...(ids.length > 1 ? { cardIds: ids } : {}),
+      ...extra,
+    });
 
     if (error) {
-      handOrigins.current.delete(cardId);
+      for (const id of ids) {
+        handOrigins.current.delete(id);
+      }
+
       setPending(null);
       setNotice(error);
+
+      // The stack comes back, so it can be changed and tried again.
+      if (ids.length > 1) {
+        setStack(ids);
+      }
     }
+  }
+
+  function shakeStack(message?: string) {
+    setShake((count) => count + 1);
+    buzz(40);
+
+    if (message) {
+      setNotice(message);
+    }
+  }
+
+  /** Doubling: a card held down is lifted out of the hand to start (or join) a stack. */
+  function holdCard(card: FanCard) {
+    if (!view.doubling || !isMyTurn || pending || stack.length > 0) {
+      return;
+    }
+
+    if (card.rank === "joker") {
+      setNotice("Jokers are played alone.");
+
+      return;
+    }
+
+    if (!game?.hand.some((other) => other.id !== card.id && other.rank === card.rank)) {
+      setNotice("You have no other card with the same number.");
+      buzz(40);
+
+      return;
+    }
+
+    setStack([card.id]);
+    buzz(15);
+  }
+
+  /** A tap while a stack is lifted adds a card of the same number, or the stack shakes its head. */
+  function addToStack(card: FanCard) {
+    if (!stackRank || card.rank !== stackRank || stack.length >= 4) {
+      shakeStack();
+
+      return;
+    }
+
+    setStack((current) => [...current, card.id]);
+  }
+
+  function playStack() {
+    if (stackCards.length < 2) {
+      setStack([]);
+
+      return;
+    }
+
+    const bottom = stackCards[0];
+
+    if (!game?.playableIds.includes(bottom.id)) {
+      shakeStack(
+        "The bottom card must match the centre card. Tap a card to put it back, then add the cards in another order.",
+      );
+
+      return;
+    }
+
+    const ids = stackCards.map((card) => card.id);
+
+    if (bottom.rank === "J") {
+      setChoice({ cardId: bottom.id, cardIds: ids, kind: "jack" });
+
+      return;
+    }
+
+    void sendPlay(bottom.id, {}, ids);
   }
 
   /** A tap on a card. A 2 or a jack first asks what to do with it. */
   function playFromHand(card: FanCard) {
     if (pending) {
+      return;
+    }
+
+    if (stack.length > 0) {
+      addToStack(card);
+
       return;
     }
 
@@ -620,6 +738,7 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
   }
 
   playRef.current = playFromHand;
+  holdRef.current = holdCard;
 
   /** Where a card that just landed on the pile came from, in screen coordinates. */
   function originFor(cardId: string): FlightOrigin | null {
@@ -628,7 +747,7 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
         candidate.type === "play" && candidate.card.id === cardId,
     );
     // Cards played a moment ago have no move yet: they are still on their way to the server.
-    const fromMe = move ? move.seatId === view.you : pending?.cardId === cardId;
+    const fromMe = move ? move.seatId === view.you : pending?.cardIds.includes(cardId) === true;
 
     if (!move && !fromMe) {
       return null;
@@ -684,7 +803,9 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
         : `No ${game.demand}, 2, J or ${demandColour} joker. Take a card from the bank.`;
     } else {
       hint = hasPlay
-        ? "Your turn. Play a card, or tap the bank to take one instead."
+        ? view.doubling
+          ? "Your turn. Tap a card, or hold one to play several of the same number together."
+          : "Your turn. Play a card, or tap the bank to take one instead."
         : "No card matches. Tap the bank to take one.";
     }
   } else {
@@ -720,11 +841,30 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
           <SoundButton />
           <ChatButton onClick={() => setChatOpen(true)} unread={unread} />
           <ReactionTray onSend={(emoji) => void onAction({ emoji, type: "react" })} />
-          <button className={quietButton} onClick={onLeave} type="button">
-            Leave
-          </button>
+          {view.canLeave ? (
+            <button className={quietButton} onClick={onLeave} type="button">
+              Leave
+            </button>
+          ) : null}
         </div>
       </div>
+
+      <TurnClock
+        endsInMs={view.turnEndsInMs}
+        mine={isMyTurnNow}
+        name={currentName}
+        resetKey={view.version}
+        totalSeconds={view.turnSeconds}
+      />
+
+      {me?.away ? (
+        <div className="pop mx-4 mt-2 flex items-center justify-between gap-3 rounded-2xl bg-rose-500/80 px-4 py-2" data-away>
+          <span className="font-bold text-sm">You are away. The table is playing for you.</span>
+          <button className="btn btn-soft" onClick={() => void run({ type: "back" })} type="button">
+            I am back
+          </button>
+        </div>
+      ) : null}
 
       <div className="flex flex-wrap justify-center gap-3 px-3 pt-4">
         {others.map((seat, index) => (
@@ -757,6 +897,45 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
                 ▼
               </span>
             ) : null}
+            {isHost && !game.over && !view.matchmade ? (
+              confirmKick === seat.id ? (
+                <div className="absolute -top-3 -right-2 z-40 flex gap-1">
+                  <button
+                    className="display rounded-full bg-rose-500 px-2 py-0.5 text-[10px]"
+                    data-kick-confirm
+                    onClick={() => {
+                      setConfirmKick(null);
+                      void run({ seatId: seat.id, type: "kickPlayer" });
+                    }}
+                    type="button"
+                  >
+                    Remove
+                  </button>
+                  <button
+                    className="display rounded-full bg-black/60 px-2 py-0.5 text-[10px]"
+                    onClick={() => setConfirmKick(null)}
+                    type="button"
+                  >
+                    Keep
+                  </button>
+                </div>
+              ) : (
+                <button
+                  aria-label={`Remove ${seat.name} from the game`}
+                  className="absolute -top-2 -right-2 z-40 grid size-6 place-items-center rounded-full bg-black/60 text-[11px] hover:bg-rose-500"
+                  data-kick
+                  onClick={() => setConfirmKick(seat.id)}
+                  type="button"
+                >
+                  ✕
+                </button>
+              )
+            ) : null}
+            {seat.away ? (
+              <span className="display -bottom-2 absolute rounded-full bg-black/60 px-2 py-0.5 text-[10px] tracking-wider">
+                AWAY
+              </span>
+            ) : null}
             {bubbles[seat.id] ? (
               <div
                 className="pop -top-9 -translate-x-1/2 absolute left-1/2 z-40 w-max max-w-[170px] rounded-2xl bg-white px-3 py-1 text-center font-bold text-emerald-950 text-xs shadow-[0_3px_0_rgba(0,0,0,0.25)]"
@@ -768,13 +947,13 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
             <div className="flex items-center gap-1.5">
               <span
                 className={cn(
-                  "display grid size-6 shrink-0 place-items-center rounded-full text-xs",
+                  "grid size-7 shrink-0 place-items-center rounded-full text-base",
                   seat.kind === "bot"
                     ? "bg-white/25 text-white"
                     : cn(SEAT_COLOURS[index % SEAT_COLOURS.length], "text-emerald-950"),
                 )}
               >
-                {seat.kind === "bot" ? "AI" : seat.name.slice(0, 1).toUpperCase()}
+                {seat.avatar}
               </span>
               <span className="max-w-[84px] truncate font-bold text-sm">
                 {seat.name}
@@ -990,6 +1169,15 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
       </div>
 
       <div className="relative z-20 bg-gradient-to-t from-black/35 to-transparent">
+        {stackCards.length > 0 ? (
+          <StackTray
+            cards={stackCards}
+            onCancel={() => setStack([])}
+            onPlay={playStack}
+            onRemove={(id) => setStack((current) => current.filter((other) => other !== id))}
+            shakeKey={shake}
+          />
+        ) : null}
         {myBubble ? (
           <div className="absolute inset-x-0 -top-10 z-[200] flex justify-center">
             <div
@@ -1048,6 +1236,7 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
               cards={handCards}
               dimmedIds={unplayable}
               hiddenIds={hiddenIds}
+              onHold={view.doubling ? onHoldStable : undefined}
               onPlay={onPlayStable}
               playedIds={NO_PLAYED}
             />
@@ -1071,11 +1260,11 @@ export function Table({ connected, onAction, onLeave, view }: TableProps) {
           }}
           onPlacement={(placement) => {
             setChoice(null);
-            void sendPlay(choice.cardId, { placement });
+            void sendPlay(choice.cardId, { placement }, choice.cardIds);
           }}
           onSuit={(suit) => {
             setChoice(null);
-            void sendPlay(choice.cardId, { suit });
+            void sendPlay(choice.cardId, { suit }, choice.cardIds);
           }}
         />
       ) : null}

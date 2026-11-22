@@ -1,5 +1,6 @@
 /** Browser-side helpers: remembering who you are, and creating/joining games. */
 
+import { getDevice } from "./device";
 import type { ClientAction, RoomView } from "./protocol";
 import { realtimeEnabled, rtRequest } from "./rt";
 
@@ -81,14 +82,21 @@ function joinedFrom(data: Record<string, unknown> | null, fallback: string): Joi
   };
 }
 
+/** Who is asking, so the table knows this device as a player. */
+function who() {
+  const device = getDevice();
+
+  return { profileId: device.id, secret: device.secret };
+}
+
 export async function createRoomRequest(name: string): Promise<Joined> {
   if (realtimeEnabled) {
-    return joinedFrom(await rtRequest("create", { name }), "Could not start a game.");
+    return joinedFrom(await rtRequest("create", { name, ...who() }), "Could not start a game.");
   }
 
   try {
     const response = await fetch("/api/rooms", {
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({ name, ...who() }),
       headers: jsonHeaders,
       method: "POST",
     });
@@ -178,14 +186,14 @@ export async function joinRoomRequest(code: string, name: string): Promise<Joine
 
   if (realtimeEnabled) {
     return joinedFrom(
-      await rtRequest("join", { code: clean, name, token }),
+      await rtRequest("join", { code: clean, name, token, ...who() }),
       "Could not join that game.",
     );
   }
 
   try {
     const response = await fetch(`/api/rooms/${encodeURIComponent(clean)}/join`, {
-      body: JSON.stringify({ name, token }),
+      body: JSON.stringify({ name, token, ...who() }),
       headers: jsonHeaders,
       method: "POST",
     });
@@ -195,4 +203,66 @@ export async function joinRoomRequest(code: string, name: string): Promise<Joine
   } catch {
     return { error: "Could not reach the game server.", ok: false };
   }
+}
+
+// --- profiles, the leaderboard and matchmaking -------------------------------------------------------
+
+type Json = Record<string, unknown>;
+
+const UNREACHABLE = { error: "Could not reach the game server. Check your connection and try again.", ok: false };
+
+async function post(url: string, body: Json): Promise<Json> {
+  try {
+    const response = await fetch(url, { body: JSON.stringify(body), headers: jsonHeaders, method: "POST" });
+
+    return (await readJson(response)) ?? UNREACHABLE;
+  } catch {
+    return UNREACHABLE;
+  }
+}
+
+/** Open ("hello") or change ("update") this device's profile. */
+export async function profileRequest(body: Json): Promise<Json> {
+  const device = getDevice();
+  const full = { profileId: device.id, secret: device.secret, ...body };
+
+  return realtimeEnabled
+    ? await rtRequest("profile", full)
+    : await post("/api/profile", { ...full, id: device.id });
+}
+
+/** The players with the most XP. */
+export async function leaderboardRequest(): Promise<Json> {
+  if (realtimeEnabled) {
+    return await rtRequest("leaderboard");
+  }
+
+  try {
+    const response = await fetch("/api/leaderboard", { cache: "no-store" });
+
+    return (await readJson(response)) ?? UNREACHABLE;
+  } catch {
+    return UNREACHABLE;
+  }
+}
+
+export type MatchWants = { sizes: number[]; turn: number | null; fillBots: boolean };
+
+export async function queueJoinRequest(wants: MatchWants): Promise<Json> {
+  const auth = who();
+
+  return realtimeEnabled
+    ? await rtRequest("queueJoin", { ...auth, ...wants })
+    : await post("/api/match", { action: "join", id: auth.profileId, secret: auth.secret, ...wants });
+}
+
+/** Plain-request matchmaking: how is the search going? */
+export async function queuePollRequest(ticket: string): Promise<Json> {
+  return await post("/api/match", { action: "poll", ticket });
+}
+
+export async function queueLeaveRequest(ticket: string): Promise<Json> {
+  return realtimeEnabled
+    ? await rtRequest("queueLeave", { ticket })
+    : await post("/api/match", { action: "leave", ticket });
 }

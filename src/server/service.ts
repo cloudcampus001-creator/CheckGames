@@ -21,6 +21,7 @@ import {
   touchSeat,
   viewFor,
 } from "./rooms";
+import { applyResults, resolveIdentity } from "./profiles";
 import { getStore } from "./store";
 
 export type Failure = {
@@ -49,6 +50,19 @@ type Step<T> = { dirty: boolean; result: T };
 export type ActResult = { ok: true; etag: string; view: RoomView | null } | Failure;
 type Outcome<T> = { kind: "ok"; result: T } | { kind: "missing" } | { kind: "busy" };
 
+/** A set that just ended is counted for the profiles in it (once: the result has an id). */
+async function countResults(room: Room, before: string | null) {
+  const result = room.social?.results;
+
+  if (result && result.id !== before) {
+    try {
+      await applyResults(result);
+    } catch (error) {
+      console.error("could not count the results", error);
+    }
+  }
+}
+
 /**
  * Load a room, let `run` change it, save it if it did. Retries when somebody
  * else saved first. `readOnly` is the last resort for plain reads: it answers
@@ -69,6 +83,7 @@ async function update<T>(
     }
 
     const now = Date.now();
+    const resultsBefore = loaded.room.social?.results?.id ?? null;
     const { dirty, result } = run(loaded.room, now);
 
     if (!dirty) {
@@ -84,6 +99,8 @@ async function update<T>(
     const saved = await store.save(code, loaded.rev, loaded.room);
 
     if (saved === "ok") {
+      await countResults(loaded.room, resultsBefore);
+
       return { kind: "ok", result };
     }
 
@@ -107,14 +124,19 @@ async function update<T>(
 
 // --- the operations -------------------------------------------------------------
 
+/** Who is asking: a device's profile id and secret. */
+export type Auth = { id: unknown; secret: unknown };
+
 export async function createRoom(
   rawName: unknown,
+  auth?: Auth,
 ): Promise<{ ok: true; code: string; seatId: string; token: string } | Failure> {
   const store = getStore();
+  const who = auth ? await resolveIdentity(auth) : null;
 
   for (let attempt = 0; attempt < 12; attempt++) {
     const code = makeCode();
-    const { room, seatId, token } = newRoom(code, rawName, Date.now());
+    const { room, seatId, token } = newRoom(code, who?.name ?? rawName, Date.now(), who?.identity);
 
     if (await store.create(code, room)) {
       return { code, ok: true, seatId, token };
@@ -128,6 +150,7 @@ export async function joinRoom(
   code: unknown,
   rawName: unknown,
   token?: unknown,
+  auth?: Auth,
 ): Promise<{ ok: true; code: string; seatId: string; token: string } | Failure> {
   const clean = normalizeCode(code);
 
@@ -135,8 +158,9 @@ export async function joinRoom(
     return failure("Enter the game code.");
   }
 
+  const who = auth ? await resolveIdentity(auth) : null;
   const outcome = await update(clean, (room, now) => {
-    const joined = joinInto(room, rawName, token, now);
+    const joined = joinInto(room, who?.name ?? rawName, token, now, who?.identity);
 
     return { dirty: joined.ok && joined.changed, result: joined };
   });
@@ -200,7 +224,7 @@ export async function pollRoom(
   }
 
   if (!outcome.result) {
-    return failure("You are not part of this game.", 404, true);
+    return failure("You are no longer at this table. The host may have removed you.", 404, true);
   }
 
   return { etag: outcome.result.etag, ok: true, view: outcome.result.view };

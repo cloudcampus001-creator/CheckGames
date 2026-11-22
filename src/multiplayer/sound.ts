@@ -122,6 +122,7 @@ export type Sfx =
   | "chat"
   | "pop"
   | "shuffle"
+  | "tick"
   | "win";
 
 const recipes: Record<Sfx, (c: AudioContext) => void> = {
@@ -151,6 +152,7 @@ const recipes: Record<Sfx, (c: AudioContext) => void> = {
   stop: (c) => {
     tone(c, 220, 0, 0.18, "sawtooth", 0.08, 110);
   },
+  tick: (c) => tone(c, 760, 0, 0.06, "square", 0.07),
   turn: (c) => {
     tone(c, 660, 0, 0.1, "sine", 0.12);
     tone(c, 880, 0.1, 0.16, "sine", 0.12);

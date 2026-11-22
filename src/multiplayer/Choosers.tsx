@@ -16,7 +16,12 @@ const SUIT_ORDER: readonly Suit[] = ["spades", "hearts", "clubs", "diamonds"];
 export const isRedSuit = (suit: Suit) => suit === "hearts" || suit === "diamonds";
 
 /** What the player is being asked about the card they just tapped. */
-export type Choice = { kind: "two" | "jack"; cardId: string };
+export type Choice = {
+  kind: "two" | "jack";
+  cardId: string;
+  /** Doubling: every card of the stack, bottom first. */
+  cardIds?: string[];
+};
 
 /**
  * A small panel above the hand. A 2 can go on top of the pile or under it; a

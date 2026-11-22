@@ -23,7 +23,8 @@ import {
   legalPlays,
   maxCardsPerPlayer,
   type Placement,
-  playCard,
+  playCards,
+  removePlayer,
   type Suit,
   SUITS,
   topCard,
@@ -45,13 +46,26 @@ import {
   type SeatView,
   type Standing,
   type TournamentView,
+  TIMER_MAX,
+  TIMER_MIN,
+  CUSTOM_VOTE_MAX_OPTIONS,
+  CUSTOM_VOTE_MIN_OPTIONS,
   type VoteKind,
   type VoteView,
 } from "../multiplayer/protocol";
 import {
+  DEFAULT_AVATAR,
+  emptyTally,
+  type GameResult,
+  modeOf,
+  type ResultPlayer,
+  START_RATING,
+} from "../multiplayer/profile";
+import {
   addWin,
   castBallot,
   closeVote,
+  customVote,
   ensureSocial,
   forgetSeat,
   openVote,
@@ -63,6 +77,7 @@ import {
   socialOf,
   systemMessage,
   tally,
+  tallyEvents,
   type Vote,
   voteIsDone,
   winningOption,
@@ -81,7 +96,15 @@ export type Seat = {
    * second or so, so someone who has not asked for a few seconds has left.
    */
   polledAt: number;
+  /** The player's profile, or null for a guest or a bot. */
+  profileId: string | null;
+  avatar: string;
+  xp: number;
+  rating: number;
 };
+
+/** Who a device is, as far as a room needs to know. */
+export type Identity = { profileId: string; avatar: string; xp: number; rating: number };
 
 /** A browser counts as connected for this long after its last request. */
 const POLL_FRESH_MS = 8000;
@@ -145,6 +168,29 @@ const NAME_MAX = 16;
 const DEFAULT_CARDS = 7;
 /** Chance that a bot throws a sticker after its move. */
 const BOT_REACT_CHANCE = 0.07;
+/** Extra time before the first turn of a set, so everybody can look at their cards. */
+const GRACE_MS = 3000;
+/** How soon the table plays for a player who is away. */
+const AWAY_DELAY_MS = 1500;
+/** Clocks in a row that run out before the table starts playing for someone. */
+const AWAY_AFTER = 3;
+/** What nobody can do at a table the system set up. */
+const MATCH_BLOCKED = new Set([
+  "addBot",
+  "removeSeat",
+  "setSettings",
+  "setAutoReturn",
+  "setTimer",
+  "setDoubling",
+  "makeHost",
+  "start",
+  "replaceWithBot",
+  "backToLobby",
+  "nextSet",
+  "playAgain",
+  "kickPlayer",
+  "ready",
+]);
 
 const fail = (error: string): Failure => ({ error, ok: false });
 
@@ -316,6 +362,8 @@ function describeEvent(room: Room, event: GameEvent): string | null {
     }
     case "stalemate":
       return "Nobody can move any more. The set ends.";
+    case "timeout":
+      return `${name(event.playerId)} ran out of time.`;
   }
 }
 
@@ -351,6 +399,8 @@ function toMove(event: GameEvent, seq: number, viewerId: string): MoveView | nul
       return { rank: event.rank, seatId: event.playerId, seq, type: "games" };
     case "tie":
       return { cards: event.cards, seatIds: event.playerIds, seq, type: "tie" };
+    case "timeout":
+      return { seatId: event.playerId, seq, type: "timeout" };
     default:
       return null;
   }
@@ -407,6 +457,7 @@ function returnDueAt(room: Room): number | null {
     !social.autoReturn ||
     social.finishedAt === null ||
     social.vote !== null ||
+    social.matchmade ||
     inTournament(room)
   ) {
     return null;
@@ -425,6 +476,8 @@ function goToLobby(room: Room) {
   social.ready = {};
   social.finishedAt = null;
   social.vote = null;
+  social.away = {};
+  social.timeouts = {};
   scheduleBots(room);
   normalizeSettings(room);
 }
@@ -465,7 +518,20 @@ function resolveVote(room: Room, now: number) {
 
   let message = `Vote ended with no result: ${vote.title}`;
 
-  if (option && vote.kind === "rules" && room.phase === "lobby" && option.patch) {
+  if (vote.kind === "custom") {
+    // The host's own question: nothing happens by itself, the result is announced.
+    const { counts, voted } = tally(vote, eligible);
+    const top = Math.max(0, ...vote.options.map((candidate) => counts[candidate.id] ?? 0));
+    const leaders = vote.options.filter((candidate) => (counts[candidate.id] ?? 0) === top);
+
+    if (top === 0) {
+      message = `Nobody voted: ${vote.title}`;
+    } else if (leaders.length === 1) {
+      message = `Vote result: ${vote.title} → ${leaders[0].label} (${top} of ${voted})`;
+    } else {
+      message = `Vote result: ${vote.title} → a tie between ${leaders.map((l) => l.label).join(" and ")} (${top} each)`;
+    }
+  } else if (option && vote.kind === "rules" && room.phase === "lobby" && option.patch) {
     const { patch } = option;
 
     if (patch.cardsPerPlayer !== undefined) {
@@ -474,6 +540,10 @@ function resolveVote(room: Room, now: number) {
 
     if (patch.jokers !== undefined) {
       room.settings.jokers = patch.jokers;
+    }
+
+    if (patch.doubling !== undefined) {
+      social.doubling = patch.doubling;
     }
 
     if (patch.endMode !== undefined) {
@@ -562,6 +632,21 @@ function tournamentView(room: Room): TournamentView {
   };
 }
 
+/**
+ * After a game in a private room nobody walks out: the table replays or goes
+ * back to the lobby. (The host decides, so the host may leave; and if the host
+ * is gone, nobody is held. Quick matches are strangers, so they may leave.)
+ */
+export function canLeaveNow(room: Room, seatId: string, now: number) {
+  if (room.phase !== "finished" || socialOf(room).matchmade || room.hostId === seatId) {
+    return true;
+  }
+
+  const host = room.seats.find((seat) => seat.id === room.hostId);
+
+  return !host || !isOnline(host, now);
+}
+
 export function viewFor(room: Room, seatId: string, now: number): RoomView {
   const game = room.game;
   const showGame = game !== null && room.phase !== "lobby";
@@ -574,6 +659,8 @@ export function viewFor(room: Room, seatId: string, now: number): RoomView {
     const place = showGame ? game.finished.indexOf(seat.id) : -1;
 
     return {
+      avatar: seat.avatar ?? DEFAULT_AVATAR,
+      away: social.away[seat.id] === true,
       checked: showGame ? game.checked.includes(seat.id) : false,
       connected: seat.kind === "bot" || seat.id === seatId || isOnline(seat, now),
       eliminated: room.tournament.eliminated.includes(seat.id),
@@ -588,9 +675,11 @@ export function viewFor(room: Room, seatId: string, now: number): RoomView {
       kind: seat.kind,
       name: seat.name,
       rank: place === -1 ? null : place + 1,
+      rating: seat.rating ?? START_RATING,
       ready: seat.kind === "bot" || social.ready[seat.id] === true,
       sittingOut: showGame ? (game.benched ?? []).includes(seat.id) : false,
       wins: social.wins[seat.id] ?? 0,
+      xp: seat.xp ?? 0,
     };
   });
 
@@ -645,11 +734,14 @@ export function viewFor(room: Room, seatId: string, now: number): RoomView {
 
   return {
     autoReturn: social.autoReturn,
+    doubling: social.doubling,
+    canLeave: canLeaveNow(room, seatId, now),
     botInMs: room.botDueAt === null ? null : Math.max(0, room.botDueAt - now),
     chat: social.chat.slice(-CHAT_WINDOW),
     code: room.code,
     game: gameView,
     hostId: room.hostId,
+    matchmade: social.matchmade,
     maxCardsPerPlayer: maxCardsFor(room),
     phase: room.phase,
     reactions: social.reactions.slice(-REACTIONS_WINDOW),
@@ -657,6 +749,11 @@ export function viewFor(room: Room, seatId: string, now: number): RoomView {
     seats,
     settings: { ...room.settings },
     tournament: tournamentView(room),
+    turnEndsInMs:
+      social.turnEndsAt === null || room.phase !== "playing"
+        ? null
+        : Math.max(0, social.turnEndsAt - now),
+    turnSeconds: social.turnSeconds,
     version: room.version,
     vote: voteView(room, social, seatId, now),
     you: seatId,
@@ -712,7 +809,96 @@ function concludeSet(room: Room, game: GameState) {
   }
 }
 
-function afterGameChange(room: Room, now = Date.now()) {
+/** Count what happened in the game since the last time (cards played, taken...). */
+function countNewEvents(room: Room) {
+  const game = room.game;
+
+  if (!game) {
+    return;
+  }
+
+  const social = ensureSocial(room);
+  const total = (game.eventBase ?? 0) + game.events.length;
+
+  // A new game starts its events again from zero.
+  if (social.eventsSeen > total) {
+    social.eventsSeen = 0;
+  }
+
+  const fresh = Math.min(game.events.length, total - social.eventsSeen);
+
+  if (fresh > 0) {
+    tallyEvents(social, game.events.slice(game.events.length - fresh));
+  }
+
+  social.eventsSeen = total;
+}
+
+/** How the set that just ended turned out, for everybody who has a profile. */
+function buildResult(room: Room, now: number): GameResult | null {
+  const game = room.game;
+
+  if (!game) {
+    return null;
+  }
+
+  const social = ensureSocial(room);
+  const players: ResultPlayer[] = [];
+  let humans = social.leavers.length;
+
+  for (const player of game.players) {
+    const seat = room.seats.find((candidate) => candidate.id === player.id);
+
+    if (seat?.kind === "human") {
+      humans += 1;
+    }
+
+    if (seat?.profileId) {
+      const place = game.finished.indexOf(player.id);
+
+      players.push({
+        champion: room.tournament.championId === player.id,
+        left: false,
+        name: seat.name,
+        profileId: seat.profileId,
+        rank: place === -1 ? null : place + 1,
+        seatId: player.id,
+        tally: social.tallies[player.id] ?? emptyTally(),
+        won: game.winner === player.id,
+      });
+    }
+  }
+
+  for (const leaver of social.leavers) {
+    players.push({
+      champion: false,
+      left: true,
+      name: leaver.name,
+      profileId: leaver.profileId,
+      rank: null,
+      seatId: leaver.seatId,
+      tally: leaver.tally,
+      won: false,
+    });
+  }
+
+  if (players.length === 0) {
+    return null;
+  }
+
+  return {
+    at: now,
+    humans,
+    id: `${room.code}-${room.gameCount}`,
+    mode: modeOf(social.matchmade, humans),
+    players,
+    size: game.players.length + social.leavers.length,
+  };
+}
+
+function afterGameChange(room: Room, now = Date.now(), grace = 0) {
+  countNewEvents(room);
+
   if (room.game?.over && room.phase === "playing") {
     const social = ensureSocial(room);
 
@@ -723,9 +909,11 @@ function afterGameChange(room: Room, now = Date.now()) {
     if (room.game.winner) {
       addWin(social, room.game.winner);
     }
+
+    social.results = buildResult(room, now);
   }
 
-  scheduleBots(room, now);
+  scheduleBots(room, now, grace);
 }
 
 /** Deal a new set to everybody who has not been eliminated. */
@@ -739,6 +927,7 @@ function startSet(room: Room) {
       room.settings.cardsPerPlayer,
       maxCardsPerPlayer(seats.length, room.settings.jokers),
     ),
+    doubling: social.doubling,
     includeJokers: room.settings.jokers,
     mode: room.settings.endMode,
     playerIds: seats.map((s) => s.id),
@@ -749,7 +938,13 @@ function startSet(room: Room) {
   social.ready = {};
   social.finishedAt = null;
   social.vote = null;
-  afterGameChange(room);
+  social.tallies = {};
+  social.leavers = [];
+  social.eventsSeen = 0;
+  social.away = {};
+  social.timeouts = {};
+  social.results = null;
+  afterGameChange(room, Date.now(), GRACE_MS);
 }
 
 const currentSeat = (room: Room) => {
@@ -764,20 +959,92 @@ const currentSeat = (room: Room) => {
   return room.seats.find((seat) => seat.id === id);
 };
 
-/** If a bot is up, note when it may move. Nobody sets a timer: see tickBots. */
-function scheduleBots(room: Room, now = Date.now()) {
+/**
+ * Note when the next thing is due for whoever is up: a bot's move, or the end
+ * of a human's clock. Nobody sets a timer: see tickBots.
+ */
+function scheduleBots(room: Room, now = Date.now(), grace = 0) {
+  const social = ensureSocial(room);
   const current = currentSeat(room);
 
-  if (!current || current.kind !== "bot") {
+  social.turnEndsAt = null;
+
+  if (!current) {
     room.botDueAt = null;
 
     return;
   }
 
-  room.botDueAt =
-    now +
-    config.botDelayMin +
-    Math.random() * (config.botDelayMax - config.botDelayMin);
+  if (current.kind === "bot") {
+    room.botDueAt =
+      now +
+      config.botDelayMin +
+      Math.random() * (config.botDelayMax - config.botDelayMin);
+
+    return;
+  }
+
+  room.botDueAt = null;
+
+  if (social.turnSeconds > 0) {
+    const away = social.away[current.id] === true;
+
+    social.turnEndsAt = now + grace + (away ? AWAY_DELAY_MS : social.turnSeconds * 1000);
+  }
+}
+
+/** The player whose turn it is took too long: the table moves for them. */
+function tickTurn(room: Room, now: number): boolean {
+  const social = ensureSocial(room);
+  const current = currentSeat(room);
+
+  if (!current || current.kind !== "human" || social.turnSeconds <= 0 || !room.game) {
+    return false;
+  }
+
+  // A clock that was switched on after this turn began (or a room from an older version).
+  if (social.turnEndsAt === null) {
+    scheduleBots(room, now);
+
+    return true;
+  }
+
+  if (now < social.turnEndsAt) {
+    return false;
+  }
+
+  const id = current.id;
+  const away = social.away[id] === true;
+  const stamped: GameState = {
+    ...room.game,
+    events: [...room.game.events, { playerId: id, type: "timeout" }],
+  };
+  let next = stamped;
+
+  if (away) {
+    next = botTurn(stamped);
+  } else {
+    // Too slow: take a card (or the cards you owe). That ends the turn.
+    const drawn = canDraw(stamped, id) ? drawCard(stamped, id) : null;
+
+    next = drawn?.ok ? drawn.state : botTurn(stamped);
+  }
+
+  room.game = trimEvents(next);
+
+  if (!away) {
+    social.timeouts[id] = (social.timeouts[id] ?? 0) + 1;
+
+    if (social.timeouts[id] >= AWAY_AFTER) {
+      social.away[id] = true;
+      systemMessage(social, `${current.name} is away. The table plays for them until they are back.`, now);
+    }
+  }
+
+  afterGameChange(room, now);
+  commit(room, now);
+
+  return true;
 }
 
 function tickBotTurn(room: Room, now: number): boolean {
@@ -829,9 +1096,10 @@ function tickBotTurn(room: Room, now: number): boolean {
  */
 export function tickBots(room: Room, now: number): boolean {
   const social = tickSocial(room, now);
+  const turn = tickTurn(room, now);
   const bots = tickBotTurn(room, now);
 
-  return social || bots;
+  return social || turn || bots;
 }
 
 /**
@@ -849,6 +1117,10 @@ export function nextWakeAt(room: Room): number | null {
 
   if (social.vote) {
     times.push(social.vote.endsAt);
+  }
+
+  if (social.turnEndsAt !== null) {
+    times.push(social.turnEndsAt);
   }
 
   const due = returnDueAt(room);
@@ -923,20 +1195,26 @@ function turnIntoBot(seat: Seat) {
   seat.kind = "bot";
   seat.token = null;
   seat.polledAt = 0;
+  seat.profileId = null;
+  seat.avatar = "🤖";
   seat.name = `${seat.name.slice(0, NAME_MAX - 6)} (bot)`;
 }
 
 // --- public API --------------------------------------------------------------
 
 /** A new room with its host seated. The service saves it. */
-export function newRoom(code: string, rawName: unknown, now: number) {
+export function newRoom(code: string, rawName: unknown, now: number, identity?: Identity | null) {
   const token = newToken();
   const host: Seat = {
+    avatar: identity?.avatar ?? DEFAULT_AVATAR,
     id: newId(),
     kind: "human",
     name: cleanName(rawName, "Host"),
     polledAt: now,
+    profileId: identity?.profileId ?? null,
+    rating: identity?.rating ?? START_RATING,
     token,
+    xp: identity?.xp ?? 0,
   };
 
   const room: Room = {
@@ -965,12 +1243,93 @@ export function newRoom(code: string, rawName: unknown, now: number) {
   return { room, seatId: host.id, token };
 }
 
+function botSeat(room: Room): Seat {
+  room.botCounter += 1;
+
+  return {
+    avatar: "🤖",
+    id: newId(),
+    kind: "bot",
+    name: uniqueName(room, `Bot ${room.botCounter}`),
+    polledAt: 0,
+    profileId: null,
+    rating: START_RATING,
+    token: null,
+    xp: 0,
+  };
+}
+
+/** A human with a profile leaves in the middle of a set: it counts as a quit. */
+function markLeft(room: Room, seat: Seat) {
+  if (!seat.profileId || !room.game?.players.some((player) => player.id === seat.id)) {
+    return;
+  }
+
+  const social = ensureSocial(room);
+
+  social.leavers.push({
+    name: seat.name,
+    profileId: seat.profileId,
+    seatId: seat.id,
+    tally: social.tallies[seat.id] ?? emptyTally(),
+  });
+}
+
+export type MatchEntry = { ticketId: string; name: string; identity: Identity };
+
+/**
+ * A table set up by matchmaking: real players (and maybe computer players),
+ * the clock and the card count chosen by the system, and the game already on.
+ */
+export function newMatchRoom(
+  code: string,
+  entries: readonly MatchEntry[],
+  options: { bots: number; turnSeconds: number; cardsPerPlayer: number; jokers?: boolean },
+  now: number,
+) {
+  const first = entries[0];
+  const created = newRoom(code, first.name, now, first.identity);
+  const room = created.room;
+  const creds: Record<string, { seatId: string; token: string }> = {
+    [first.ticketId]: { seatId: created.seatId, token: created.token },
+  };
+
+  for (const entry of entries.slice(1)) {
+    const joined = joinInto(room, entry.name, undefined, now, entry.identity);
+
+    if (joined.ok) {
+      creds[entry.ticketId] = { seatId: joined.seatId, token: joined.token };
+    }
+  }
+
+  for (let i = 0; i < options.bots; i++) {
+    room.seats.push(botSeat(room));
+  }
+
+  const social = ensureSocial(room);
+
+  social.chat = [];
+  social.matchmade = true;
+  social.autoReturn = false;
+  social.turnSeconds = options.turnSeconds;
+  room.settings.jokers = options.jokers ?? true;
+  room.settings.cardsPerPlayer = options.cardsPerPlayer;
+  normalizeSettings(room);
+  room.tournament = freshTournament();
+  startSet(room);
+  systemMessage(social, "Quick match! Good luck.", now);
+  commit(room, now);
+
+  return { creds, room };
+}
+
 /** Take a seat, or get your old one back with the token you saved. */
 export function joinInto(
   room: Room,
   rawName: unknown,
   token: unknown,
   now: number,
+  identity?: Identity | null,
 ): Failure | { ok: true; code: string; seatId: string; token: string; changed: boolean } {
   // Coming back with a saved token gives you your old seat.
   if (typeof token === "string") {
@@ -986,6 +1345,21 @@ export function joinInto(
     }
   }
 
+  // A device that sits at this table already gets its own seat back, even
+  // without the saved token (a cleared browser, a new tab).
+  if (identity) {
+    const mine = room.seats.find(
+      (seat) =>
+        seat.kind === "human" && seat.token !== null && seat.profileId === identity.profileId,
+    );
+
+    if (mine) {
+      const changed = touchSeat(room, mine.id, now);
+
+      return { changed, code: room.code, ok: true, seatId: mine.id, token: mine.token as string };
+    }
+  }
+
   if (room.phase !== "lobby") {
     return fail("That game has already started.");
   }
@@ -995,11 +1369,15 @@ export function joinInto(
   }
 
   const seat: Seat = {
+    avatar: identity?.avatar ?? DEFAULT_AVATAR,
     id: newId(),
     kind: "human",
     name: uniqueName(room, cleanName(rawName, `Player ${room.seats.length + 1}`)),
     polledAt: now,
+    profileId: identity?.profileId ?? null,
+    rating: identity?.rating ?? START_RATING,
     token: newToken(),
+    xp: identity?.xp ?? 0,
   };
 
   room.seats.push(seat);
@@ -1043,6 +1421,16 @@ export function applyAction(
 
   const needHost = () => (isHost ? null : fail("Only the host can do that."));
 
+  const quick = ensureSocial(room).matchmade;
+
+  if (
+    quick &&
+    typeof action.type === "string" &&
+    (MATCH_BLOCKED.has(action.type) || (action.type === "startVote" && action.kind !== "rematch"))
+  ) {
+    return fail("This is a quick match: the table is already set up.");
+  }
+
   switch (action.type) {
     case "addBot": {
       const denied = needHost();
@@ -1060,13 +1448,7 @@ export function applyAction(
       }
 
       room.botCounter += 1;
-      room.seats.push({
-        id: newId(),
-        kind: "bot",
-        name: uniqueName(room, `Bot ${room.botCounter}`),
-        polledAt: 0,
-        token: null,
-      });
+      room.seats.push(botSeat(room));
       normalizeSettings(room);
       commit(room);
 
@@ -1190,6 +1572,89 @@ export function applyAction(
       return { ok: true };
     }
 
+    case "setDoubling": {
+      const denied = needHost();
+
+      if (denied) {
+        return denied;
+      }
+
+      if (room.phase !== "lobby") {
+        return fail("Doubling can only be changed in the lobby.");
+      }
+
+      if (typeof action.value !== "boolean") {
+        return fail("Doubling can only be on or off.");
+      }
+
+      ensureSocial(room).doubling = action.value;
+      commit(room, now);
+
+      return { ok: true };
+    }
+
+    case "setTimer": {
+      const denied = needHost();
+
+      if (denied) {
+        return denied;
+      }
+
+      if (room.phase !== "lobby") {
+        return fail("The clock can only be changed in the lobby.");
+      }
+
+      const seconds = typeof action.seconds === "number" ? Math.round(action.seconds) : Number.NaN;
+
+      if (!Number.isFinite(seconds) || (seconds !== 0 && (seconds < TIMER_MIN || seconds > TIMER_MAX))) {
+        return fail(`Choose ${TIMER_MIN} to ${TIMER_MAX} seconds, or no clock.`);
+      }
+
+      ensureSocial(room).turnSeconds = seconds;
+      commit(room, now);
+
+      return { ok: true };
+    }
+
+    case "kickPlayer": {
+      const denied = needHost();
+
+      if (denied) {
+        return denied;
+      }
+
+      if (room.phase !== "playing" || !room.game) {
+        return fail("Players can only be removed from a game while it is on.");
+      }
+
+      const target = room.seats.find((s) => s.id === action.seatId);
+
+      if (!target || target.id === seat.id) {
+        return fail("That player cannot be removed.");
+      }
+
+      const social = ensureSocial(room);
+      const name = target.name;
+
+      room.game = trimEvents(removePlayer(room.game, target.id));
+      removeSeatNow(room, target.id);
+      systemMessage(social, `${name} was removed by the host.`, now);
+      afterGameChange(room, now);
+      commit(room, now);
+
+      return { ok: true };
+    }
+
+    case "back": {
+      const social = ensureSocial(room);
+
+      delete social.away[seat.id];
+      social.timeouts[seat.id] = 0;
+      commit(room, now);
+
+      return { ok: true };
+    }
+
     case "start": {
       const denied = needHost();
 
@@ -1233,6 +1698,7 @@ export function applyAction(
         return fail("That player cannot be replaced.");
       }
 
+      markLeft(room, target);
       turnIntoBot(target);
       scheduleBots(room);
       commit(room);
@@ -1331,7 +1797,13 @@ export function applyAction(
           ? (action.suit as Suit)
           : undefined;
 
-        result = playCard(room.game, seat.id, action.cardId, {
+        // Doubling: several cards at once, bottom first.
+        const stack =
+          Array.isArray(action.cardIds) && action.cardIds.length > 0
+            ? action.cardIds.filter((id): id is string => typeof id === "string")
+            : [action.cardId];
+
+        result = playCards(room.game, seat.id, stack, {
           placement,
           suit,
         });
@@ -1346,6 +1818,12 @@ export function applyAction(
       }
 
       room.game = trimEvents(result.state);
+
+      // Playing again is coming back.
+      const social = ensureSocial(room);
+
+      delete social.away[seat.id];
+      social.timeouts[seat.id] = 0;
       afterGameChange(room, now);
       commit(room);
 
@@ -1430,6 +1908,22 @@ export function applyAction(
         }
 
         title = "Play again?";
+      } else if (kind === "custom") {
+        const denied = needHost();
+
+        if (denied) {
+          return denied;
+        }
+
+        const written = customVote(action.question, action.options);
+
+        if (!written) {
+          return fail(
+            `Write a question and ${CUSTOM_VOTE_MIN_OPTIONS} to ${CUSTOM_VOTE_MAX_OPTIONS} different choices.`,
+          );
+        }
+
+        ({ options, title } = written);
       } else {
         return fail("Unknown vote.");
       }
@@ -1498,6 +1992,10 @@ export function applyAction(
     }
 
     case "leave": {
+      if (!canLeaveNow(room, seat.id, now)) {
+        return fail("The game is over. Play again or go back to the lobby.");
+      }
+
       const inTheSet = room.game?.players.some((p) => p.id === seat.id) ?? false;
       const social = ensureSocial(room);
 
@@ -1505,6 +2003,7 @@ export function applyAction(
         // The game goes on without them: a bot takes the seat.
         const was = seat.name;
 
+        markLeft(room, seat);
         turnIntoBot(seat);
         systemMessage(social, `${was} left. A bot took the seat.`, now);
       } else {

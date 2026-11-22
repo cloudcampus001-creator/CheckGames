@@ -31,6 +31,11 @@ export type PlayingCardFanProps = {
    * (the fan is not redrawn when only this changes).
    */
   onPlay?: (card: FanCard) => void;
+  /**
+   * Called when a card is held down for a moment (doubling: lift it to add
+   * more cards). Keep this function the same between renders too.
+   */
+  onHold?: (card: FanCard) => void;
   /** Cards that stay in their place but are invisible (a card still flying in). */
   hiddenIds?: readonly string[];
   /** Cards drawn dimmer because they cannot be played right now. */
@@ -56,6 +61,8 @@ const pileLift = -224;
 const playThresholdY = -80;
 const playThresholdVelocity = -600;
 const minFanSpacing = 26;
+/** How long a card is held down before it is lifted (doubling). */
+const HOLD_MS = 420;
 
 const rankNames: Record<PlayingCardRank | "joker", string> = {
   joker: "joker",
@@ -103,6 +110,7 @@ function PlayingCardFanBase({
   className,
   dimmedIds,
   hiddenIds,
+  onHold,
   onPlay,
   playedIds: controlledPlayedIds,
 }: PlayingCardFanProps) {
@@ -114,6 +122,9 @@ function PlayingCardFanBase({
     [],
   );
   const [hoveredId, setHoveredId] = useState<string | null>(null);
+  // A card held down long enough is "lifted": the tap that ends the hold is not a play.
+  const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const held = useRef<string | null>(null);
 
   const playedIds = controlledPlayedIds ?? internalPlayedIds;
 
@@ -194,6 +205,30 @@ function PlayingCardFanBase({
 
   function clearHover(id: string) {
     setHoveredId((current) => (current === id ? null : current));
+  }
+
+  function startHold(card: FanCard) {
+    if (!onHold) {
+      return;
+    }
+
+    if (holdTimer.current) {
+      clearTimeout(holdTimer.current);
+    }
+
+    held.current = null;
+    holdTimer.current = setTimeout(() => {
+      holdTimer.current = null;
+      held.current = card.id;
+      onHold(card);
+    }, HOLD_MS);
+  }
+
+  function stopHold() {
+    if (holdTimer.current) {
+      clearTimeout(holdTimer.current);
+      holdTimer.current = null;
+    }
   }
 
   function playCard(card: FanCard) {
@@ -289,7 +324,14 @@ function PlayingCardFanBase({
               dragElastic={0.12}
               dragSnapToOrigin
               onBlur={() => clearHover(card.id)}
+              onDragStart={stopHold}
               onDragEnd={(_event, info) => {
+                if (held.current === card.id) {
+                  held.current = null;
+
+                  return;
+                }
+
                 if (
                   info.offset.y < playThresholdY ||
                   info.velocity.y < playThresholdVelocity
@@ -308,7 +350,18 @@ function PlayingCardFanBase({
                   setHoveredId(card.id);
                 }
               }}
+              onPointerCancel={stopHold}
+              onPointerDown={() => startHold(card)}
+              onPointerLeave={stopHold}
+              onPointerUp={stopHold}
               onTap={() => {
+                // The tap that lets go of a held card only lifts it, it does not play it.
+                if (held.current === card.id) {
+                  held.current = null;
+
+                  return;
+                }
+
                 if (!isPlayed) {
                   playCard(card);
                 }

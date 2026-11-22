@@ -62,6 +62,16 @@ export const REACTIONS = [
   "FAST!",
 ] as const;
 
+/** The turn clocks the host can pick (seconds, 0 = no clock). Any value from 3 to 120 also works. */
+export const TIMER_CHOICES = [0, 5, 10, 15, 30] as const;
+export const TIMER_MIN = 3;
+export const TIMER_MAX = 120;
+/** A question the host writes: how many choices it may have. */
+export const CUSTOM_VOTE_MIN_OPTIONS = 2;
+export const CUSTOM_VOTE_MAX_OPTIONS = 6;
+/** The last seconds of a turn are counted out loud on screen. */
+export const TIMER_WARNING_SECONDS = 5;
+
 /** One-tap messages in the chat box. */
 export const QUICK_PHRASES = [
   "Check! 😈",
@@ -85,8 +95,8 @@ export type ChatMessage = {
 /** A sticker that was just thrown. `seq` counts up through the whole room. */
 export type ReactionEvent = { seq: number; seatId: string; emoji: string };
 
-export type VoteKind = "rules" | "kick" | "rematch";
-export type VoteTopic = "cards" | "jokers" | "ending";
+export type VoteKind = "rules" | "kick" | "rematch" | "custom";
+export type VoteTopic = "cards" | "jokers" | "ending" | "doubling";
 
 export type VoteView = {
   id: number;
@@ -131,6 +141,12 @@ export type SeatView = {
   ready: boolean;
   /** Sets won since this room was made. */
   wins: number;
+  /** The player's picture, and how far they have come. */
+  avatar: string;
+  xp: number;
+  rating: number;
+  /** Not answering: the table plays for them until they tap "I am back". */
+  away: boolean;
 };
 
 /** How many cards of the pile (newest on top) every player gets to see. */
@@ -175,6 +191,8 @@ export type MoveView = { seq: number } & (
   | { type: "games"; seatId: string; rank: number }
   /** Several seats finished in the same round: each took `cards` and plays on. */
   | { type: "tie"; seatIds: string[]; cards: number }
+  /** The seat ran out of time and the table moved on for it. */
+  | { type: "timeout"; seatId: string }
 );
 
 export type Standing = { seatId: string; name: string; rank: number };
@@ -248,6 +266,16 @@ export type RoomView = {
   returnInMs: number | null;
   /** When it is a bot's turn: milliseconds until it moves (when this view was made). */
   botInMs: number | null;
+  /** Seconds each turn lasts, or 0 for no clock. */
+  turnSeconds: number;
+  /** Milliseconds left of the current turn (when this view was made), or null. */
+  turnEndsInMs: number | null;
+  /** A quick match: set up by the system, no host controls. */
+  matchmade: boolean;
+  /** Cards of the same number may be played together. */
+  doubling: boolean;
+  /** False after a game in a private room: replay or go back to the lobby, nobody walks out. */
+  canLeave: boolean;
 };
 
 export type ClientAction =
@@ -262,6 +290,9 @@ export type ClientAction =
       elimination?: boolean;
     }
   | { type: "setAutoReturn"; value: boolean }
+  | { type: "setTimer"; seconds: number }
+  | { type: "setDoubling"; value: boolean }
+  | { type: "kickPlayer"; seatId: string }
   | { type: "makeHost"; seatId: string }
   | { type: "start" }
   // host, during a game
@@ -271,7 +302,14 @@ export type ClientAction =
   | { type: "playAgain" }
   | { type: "backToLobby" }
   // everyone, during a game
-  | { type: "play"; cardId: string; placement?: Placement; suit?: Suit }
+  | {
+      type: "play";
+      cardId: string;
+      /** Doubling: all the cards, bottom first (the first is `cardId`). */
+      cardIds?: string[];
+      placement?: Placement;
+      suit?: Suit;
+    }
   | { type: "draw" }
   | { type: "check" }
   // everyone
@@ -279,6 +317,15 @@ export type ClientAction =
   | { type: "chat"; text: string }
   | { type: "react"; emoji: string }
   | { type: "ready"; ready: boolean }
-  | { type: "startVote"; kind: VoteKind; topic?: VoteTopic; seatId?: string }
+  | { type: "back" }
+  | {
+      type: "startVote";
+      kind: VoteKind;
+      topic?: VoteTopic;
+      seatId?: string;
+      /** For a vote the host writes. */
+      question?: string;
+      options?: string[];
+    }
   | { type: "castVote"; choice: string }
   | { type: "cancelVote" };

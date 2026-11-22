@@ -1,7 +1,14 @@
 "use client";
 
+import { useState } from "react";
 import { cn } from "@/helpers/classname-helper";
-import type { ClientAction, RoomView, VoteView } from "./protocol";
+import {
+  type ClientAction,
+  CUSTOM_VOTE_MAX_OPTIONS,
+  CUSTOM_VOTE_MIN_OPTIONS,
+  type RoomView,
+  type VoteView,
+} from "./protocol";
 import { useCountdown } from "./useCountdown";
 
 /** A vote that is running: the choices, how many picked each, and the time left. */
@@ -117,6 +124,7 @@ export function StartVote({
     { action: { kind: "rules", topic: "cards", type: "startVote" }, label: "Cards each" },
     { action: { kind: "rules", topic: "jokers", type: "startVote" }, label: "Jokers" },
     { action: { kind: "rules", topic: "ending", type: "startVote" }, label: "How a game ends" },
+    { action: { kind: "rules", topic: "doubling", type: "startVote" }, label: "Doubling" },
   ];
 
   return (
@@ -151,6 +159,68 @@ export function StartVote({
           </div>
         </div>
       ) : null}
+    </details>
+  );
+}
+
+/**
+ * The host writes a question and the choices. Everybody votes, and the result
+ * is announced in the chat: nothing changes by itself, the host acts on it.
+ */
+export function CustomVoteForm({ onAction }: { onAction: (action: ClientAction) => void }) {
+  const [question, setQuestion] = useState("");
+  const [options, setOptions] = useState(["", ""]);
+  const filled = options.map((option) => option.trim()).filter(Boolean);
+  const ready = question.trim().length >= 3 && new Set(filled.map((o) => o.toLowerCase())).size >= CUSTOM_VOTE_MIN_OPTIONS;
+
+  return (
+    <details className="rounded-2xl bg-black/20 px-4 py-3 text-sm" data-custom-vote>
+      <summary className="cursor-pointer font-bold text-white/90">Write your own vote (host)</summary>
+      <div className="mt-3 space-y-2">
+        <input
+          aria-label="Your question"
+          className="input py-2.5 text-sm"
+          maxLength={80}
+          onChange={(event) => setQuestion(event.target.value)}
+          placeholder="Your question, e.g. Who pays for the drinks?"
+          value={question}
+        />
+        {options.map((option, index) => (
+          <input
+            aria-label={`Choice ${index + 1}`}
+            className="input py-2.5 text-sm"
+            key={index}
+            maxLength={40}
+            onChange={(event) =>
+              setOptions((current) => current.map((value, at) => (at === index ? event.target.value : value)))
+            }
+            placeholder={`Choice ${index + 1}`}
+            value={option}
+          />
+        ))}
+        <div className="flex flex-wrap gap-2">
+          {options.length < CUSTOM_VOTE_MAX_OPTIONS ? (
+            <button className="btn btn-soft" onClick={() => setOptions((current) => [...current, ""])} type="button">
+              + Add a choice
+            </button>
+          ) : null}
+          <button
+            className="btn btn-gold"
+            disabled={!ready}
+            onClick={() => {
+              onAction({ kind: "custom", options: filled, question: question.trim(), type: "startVote" });
+              setQuestion("");
+              setOptions(["", ""]);
+            }}
+            type="button"
+          >
+            Start the vote
+          </button>
+        </div>
+        <p className="text-white/55 text-xs">
+          Everybody at the table votes and the result is shown in the chat. Nothing changes by itself.
+        </p>
+      </div>
     </details>
   );
 }

@@ -42,8 +42,6 @@ const suitPaths: Record<PlayingCardSuit, string> = {
     "M12 1.8C6.9 7.2 3.6 10.3 3.6 13.6a4.35 4.35 0 0 0 7.1 3.36c-.3 1.9-1 3.26-2.35 4.54h7.3c-1.35-1.28-2.05-2.64-2.35-4.54a4.35 4.35 0 0 0 7.1-3.36c0-3.3-3.3-6.4-8.4-11.8Z",
 };
 
-const redSuits: ReadonlySet<string> = new Set(["diamonds", "hearts", "red"]);
-
 const courtSuitCode: Record<PlayingCardSuit, string> = {
   clubs: "C",
   diamonds: "D",
@@ -230,34 +228,44 @@ export function PlayingCard({
   suit,
   width = 112,
 }: PlayingCardProps) {
-  const isRed = redSuits.has(suit);
   const isJoker = rank === "joker";
   // For jokers none of the ordinary-card parts below are drawn.
   const standardRank = rank as PlayingCardRank;
   const standardSuit = suit as PlayingCardSuit;
+  // A red joker takes the colour of the hearts, a black joker the colour of the spades.
+  const colourSuit = isJoker ? (suit === "red" ? "hearts" : "spades") : suit;
   const pips = isJoker ? undefined : pipLayouts[standardRank];
   const isCourt = !isJoker && courtRanks.has(standardRank);
 
   return (
     <div
       className={cn(
-        "relative aspect-[5/7] select-none overflow-hidden rounded-[0.9em] border border-black/10 bg-white shadow-[0_1px_2px_rgba(0,0,0,0.05),0_4px_10px_rgba(0,0,0,0.07)]",
-        !faceDown && (isRed ? "text-[#c22f2f]" : "text-[#23262d]"),
+        "relative aspect-[5/7] select-none overflow-hidden rounded-[0.9em] border shadow-[0_1px_2px_rgba(0,0,0,0.05),0_4px_10px_rgba(0,0,0,0.07)]",
+        faceDown && "border-black/10 bg-white",
         className,
       )}
-      style={{ fontSize: width / 14, width }}
+      style={{
+        fontSize: width / 14,
+        width,
+        ...(faceDown
+          ? {}
+          : {
+              backgroundColor: "var(--card-bg, #fff)",
+              borderColor: "var(--card-border, rgba(0,0,0,0.1))",
+              color: `var(--suit-${colourSuit}, #23262d)`,
+            }),
+      }}
     >
       {faceDown ? (
         <div
           className="absolute inset-[0.55em] rounded-[0.5em] border border-black/10"
           style={{
-            backgroundColor: "#9d2c35",
-            // Crosshatch gradients sit underneath the PNG pattern as a
-            // fallback while the image loads.
-            backgroundImage:
-              "url('/experiments/card-back.png'), repeating-linear-gradient(45deg, rgba(255,255,255,0.16) 0, rgba(255,255,255,0.16) 1.5px, transparent 1.5px, transparent 7px), repeating-linear-gradient(-45deg, rgba(255,255,255,0.16) 0, rgba(255,255,255,0.16) 1.5px, transparent 1.5px, transparent 7px)",
+            // The chosen back (colour and pattern). The default one keeps the
+            // PNG pattern over a crosshatch that shows while the image loads.
+            backgroundColor: "var(--back-color, #9d2c35)",
+            backgroundImage: "var(--back-image)",
             backgroundPosition: "center",
-            backgroundSize: "cover, auto, auto",
+            backgroundSize: "var(--back-size, cover, auto, auto)",
           }}
         />
       ) : isJoker ? (

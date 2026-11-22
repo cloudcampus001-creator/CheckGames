@@ -5,10 +5,10 @@ export const runtime = "nodejs";
 
 type Context = { params: Promise<{ code: string }> };
 
-/** Take a seat in a game, or get your old seat back with your saved token. */
+/** Take a seat in a game, or get your old seat back with your saved token (or your profile). */
 export async function POST(request: Request, { params }: Context) {
   const { code } = await params;
-  let body: { name?: unknown; token?: unknown } = {};
+  let body: { name?: unknown; profileId?: unknown; secret?: unknown; token?: unknown } = {};
 
   try {
     body = (await request.json()) as typeof body;
@@ -17,7 +17,7 @@ export async function POST(request: Request, { params }: Context) {
   }
 
   try {
-    const result = await joinRoom(code, body.name, body.token);
+    const result = await joinRoom(code, body.name, body.token, { id: body.profileId, secret: body.secret });
 
     return Response.json(result, { status: result.ok ? 200 : result.status });
   } catch (error) {

@@ -16,8 +16,10 @@ import {
   legalPlays,
   maxCardsPerPlayer,
   playCard,
+  playCards,
   playContext,
   type Rank,
+  removePlayer,
   type Result,
   type StandardCard,
   type Suit,
@@ -915,6 +917,252 @@ assert.ok(isSpecial(joker("red")) && !isSpecial(s("9", "hearts")));
   assert.equal(second.events[second.events.length - 1].type, "stalemate");
 }
 
+// === doubling: several cards of the same number together ============================================
+{
+  const twice = (options: Parameters<typeof make>[0]) => ({ ...make(options), doubling: true });
+
+  // the example: 4 of hearts and 4 of spades on a spade: the spade is the bottom one
+  const spade = twice({
+    centre: s("9", "spades"),
+    hands: [[s("4", "hearts"), s("4", "spades"), s("K", "hearts")], [s("5", "hearts")]],
+  });
+  const ok2 = ok(playCards(spade, "p0", ["4-spades", "4-hearts"]));
+
+  assert.deepEqual(ids(ok2.pile), ["9-spades", "4-spades", "4-hearts"], "the first one goes down first");
+  assert.equal(topCard(ok2).id, "4-hearts", "the last one is the new centre card");
+  assert.deepEqual(ids(handOf(ok2, "p0")), ["K-hearts"]);
+  assert.equal(ok2.current, 1);
+  assert.deepEqual(ok2.checked, ["p0"], "one card left: on check");
+  assert.equal(ok2.events.filter((e) => e.type === "play").length, 2, "each card is a move");
+
+  // the other way round is refused: the hearts do not connect to the 9 of spades
+  refused(playCards(spade, "p0", ["4-hearts", "4-spades"]), /bottom card must match the centre card/);
+
+  // on another 4 both connect: either order
+  const four = twice({ centre: s("4", "diamonds"), hands: [[s("4", "hearts"), s("4", "spades"), s("K", "hearts")], [s("5", "hearts")]] });
+
+  assert.equal(topCard(ok(playCards(four, "p0", ["4-hearts", "4-spades"]))).id, "4-spades");
+  assert.equal(topCard(ok(playCards(four, "p0", ["4-spades", "4-hearts"]))).id, "4-hearts");
+
+  // three and four of a kind
+  const many = twice({
+    centre: s("9", "clubs"),
+    hands: [[s("5", "clubs"), s("5", "hearts"), s("5", "spades"), s("5", "diamonds"), s("K", "hearts")], [s("5", "hearts")]],
+  });
+
+  assert.equal(ok(playCards(many, "p0", ["5-clubs", "5-hearts", "5-spades"])).pile.length, 4);
+  assert.equal(handOf(ok(playCards(many, "p0", ["5-clubs", "5-hearts", "5-spades", "5-diamonds"])), "p0").length, 1);
+
+  // what is not allowed
+  const off = make({ centre: s("9", "spades"), hands: [[s("4", "hearts"), s("4", "spades")], [s("5", "hearts")]] });
+
+  refused(playCards(off, "p0", ["4-spades", "4-hearts"]), /not allowed at this table/);
+  refused(playCards(spade, "p0", ["4-spades", "K-hearts"]), /same number or letter/);
+  refused(playCards(spade, "p0", ["4-spades", "4-spades"]), /only once/);
+  refused(playCards(spade, "p0", ["4-spades", "4-clubs"]), /do not have/);
+  refused(playCards(spade, "p0", []), /Choose a card/);
+  refused(playCards(spade, "p1", ["5-hearts"]), /not your turn/);
+  refused(
+    playCards(twice({ centre: s("9", "hearts"), hands: [[joker("red"), joker("black")], [s("5", "hearts")]] }), "p0", ["joker-red", "joker-black"]),
+    /Jokers are played alone/,
+  );
+  refused(playCards(twice({ centre: s("2", "spades"), hands: [[s("2", "hearts"), s("2", "clubs")], [s("5", "hearts")]] }), "p0", ["2-hearts", "2-clubs"], { placement: "under" }), /always go on top/);
+
+  // one card still works as before, with or without doubling
+  assert.equal(topCard(ok(playCards(spade, "p0", ["4-spades"]))).id, "4-spades");
+
+  // 7s add up: two 7s make the next player take 4, and the answer adds on top
+  const sevens = twice({
+    centre: s("7", "spades"),
+    hands: [[s("7", "hearts"), s("7", "clubs"), s("K", "hearts")], [s("7", "diamonds"), s("5", "hearts")], [s("6", "hearts")]],
+  });
+  const hit = ok(playCards(sevens, "p0", ["7-hearts", "7-clubs"]));
+
+  assert.equal(hit.pending, 4);
+  assert.equal(hit.current, 1);
+  assert.equal(ok(playCard(hit, "p1", "7-diamonds")).pending, 6);
+
+  // ...and a stack of 7s can answer an attack
+  const answer = twice({
+    centre: s("7", "spades"),
+    current: 1,
+    hands: [[s("K", "hearts")], [s("7", "hearts"), s("7", "clubs"), s("5", "hearts")], [s("6", "hearts")]],
+    pending: 2,
+  });
+
+  assert.equal(ok(playCards(answer, "p1", ["7-hearts", "7-clubs"])).pending, 6);
+
+  // aces: two aces stop two players
+  const aces = twice({
+    centre: s("A", "spades"),
+    hands: [[s("A", "hearts"), s("A", "clubs"), s("K", "hearts")], [s("5", "hearts")], [s("6", "hearts")], [s("8", "hearts")]],
+  });
+  const stopped = ok(playCards(aces, "p0", ["A-hearts", "A-clubs"]));
+
+  assert.deepEqual(stopped.events.filter((e) => e.type === "skip"), [
+    { playerId: "p1", type: "skip" },
+    { playerId: "p2", type: "skip" },
+  ]);
+  assert.equal(stopped.current, 3);
+
+  // everybody else stopped: you play again, so the aces cannot win the game
+  const all = twice({
+    centre: s("A", "spades"),
+    hands: [[s("A", "hearts"), s("A", "clubs")], [s("5", "hearts")], [s("6", "hearts")]],
+  });
+  const noWin = ok(playCards(all, "p0", ["A-hearts", "A-clubs"]));
+
+  assert.deepEqual(noWin.finished, [], "no games with aces when everybody is stopped");
+  assert.equal(handOf(noWin, "p0").length, 1, "they take a card");
+  assert.equal(noWin.current, 1);
+  assert.ok(noWin.checked.includes("p0"));
+
+  // but two aces are fine when somebody is left to play
+  const some = twice({
+    centre: s("A", "spades"),
+    hands: [[s("A", "hearts"), s("A", "clubs")], [s("5", "hearts")], [s("6", "hearts")], [s("8", "hearts")]],
+  });
+
+  assert.deepEqual(ok(playCards(some, "p0", ["A-hearts", "A-clubs"])).finished, ["p0"]);
+
+  // jacks: one sign for the whole stack
+  const jacks = twice({
+    centre: s("9", "spades"),
+    hands: [[s("J", "hearts"), s("J", "clubs"), s("K", "hearts")], [s("5", "hearts"), s("5", "spades")]],
+  });
+
+  refused(playCards(jacks, "p0", ["J-hearts", "J-clubs"]), /Choose a sign/);
+
+  const asked = ok(playCards(jacks, "p0", ["J-hearts", "J-clubs"], { suit: "diamonds" }));
+
+  assert.equal(asked.demand, "diamonds");
+  assert.equal(topCard(asked).id, "J-clubs");
+  assert.deepEqual(asked.events.filter((e) => e.type === "play").map((e) => e.type === "play" && e.demand), [null, "diamonds"]);
+
+  // a request: the bottom card must be of the sign asked for
+  const request = twice({
+    centre: s("J", "clubs"),
+    demand: "hearts",
+    hands: [[s("5", "hearts"), s("5", "spades"), s("K", "hearts")], [s("5", "hearts")]],
+  });
+
+  assert.equal(ok(playCards(request, "p0", ["5-hearts", "5-spades"])).demand, null);
+  refused(playCards(request, "p0", ["5-spades", "5-hearts"]), /heart card, a 2 or a jack/);
+
+  // the whole hand at once wins the game
+  const lot = twice({
+    centre: s("9", "spades"),
+    hands: [[s("4", "spades"), s("4", "hearts"), s("4", "clubs")], [s("5", "hearts")]],
+  });
+  const out = ok(playCards(lot, "p0", ["4-spades", "4-hearts", "4-clubs"]));
+
+  assert.deepEqual(out.finished, ["p0"]);
+  assert.equal(totalCards(out), totalCards(lot));
+
+  // bots use it when it is on, and never break a rule
+  let bots = 0;
+
+  for (let seed = 1; seed <= 200; seed++) {
+    const game = createGame({
+      cardsPerPlayer: 9,
+      doubling: true,
+      playerNames: ["A", "B", "C"],
+      rng: mulberry32(seed),
+    });
+    let state = game;
+
+    for (let turn = 0; turn < 40 && !state.over; turn++) {
+      const before = state.events.length;
+
+      state = botTurn(state, mulberry32(seed * 100 + turn));
+
+      const plays = state.events.slice(before).filter((e) => e.type === "play");
+
+      if (plays.length > 1) {
+        bots += 1;
+        assert.ok(plays.every((e) => e.type === "play" && e.card.rank === (plays[0].type === "play" ? plays[0].card.rank : "")));
+      }
+    }
+  }
+
+  assert.ok(bots > 20, `bots played stacks (${bots})`);
+}
+
+// === the host removes a player in the middle of a game ======================================
+{
+  const base = () =>
+    make({
+      hands: [[s("9", "hearts"), s("3", "hearts")], [s("K", "hearts"), s("4", "hearts")], [s("Q", "hearts"), s("5", "hearts")]],
+    });
+
+  // the one whose turn it is: their cards go back, the next one is up
+  const game = base();
+  const total = totalCards(game);
+  const without1 = removePlayer({ ...game, current: 1 }, "p1", mulberry32(1));
+
+  assert.deepEqual(without1.players.map((p) => p.id), ["p0", "p2"]);
+  assert.equal(without1.players[without1.current].id, "p2", "the next player is up");
+  assert.equal(without1.bank.length, 6 + 2, "their two cards are in the bank");
+  assert.equal(totalCards(without1), total, "no card lost");
+  assert.equal(without1.over, false);
+
+  // the last seat: the turn wraps round
+  const wrap = removePlayer({ ...game, current: 2 }, "p2", mulberry32(1));
+
+  assert.equal(wrap.players[wrap.current].id, "p0");
+
+  // someone else: the turn stays with whoever had it, even though the seats moved
+  const other = removePlayer({ ...game, current: 2 }, "p0", mulberry32(1));
+
+  assert.equal(other.players[other.current].id, "p2");
+  assert.deepEqual(other.players.map((p) => p.id), ["p1", "p2"]);
+
+  // play goes on normally afterwards
+  const played = ok(drawCard(other, "p2", mulberry32(2)));
+
+  assert.equal(played.players.length, 2);
+
+  // an attack aimed at the one who left disappears
+  const attacked = removePlayer(
+    { ...game, current: 1, pending: 4, pile: [s("7", "spades")] },
+    "p1",
+    mulberry32(1),
+  );
+
+  assert.equal(attacked.pending, 0);
+
+  // down to one player: they win
+  const duel = make({ hands: [[s("9", "hearts")], [s("K", "hearts")]] });
+  const alone = removePlayer(duel, "p1", mulberry32(1));
+
+  assert.equal(alone.over, true);
+  assert.equal(alone.winner, "p0");
+  assert.deepEqual(alone.finished, ["p0"]);
+  assert.equal(totalCards(alone), totalCards(duel));
+
+  // a player who is already out can be removed too, and the others carry on
+  const ranking = make({
+    finished: ["p0"],
+    hands: [[], [s("K", "hearts")], [s("Q", "hearts")]],
+    mode: "ranking",
+  });
+  const rest = removePlayer(ranking, "p0", mulberry32(1));
+
+  assert.equal(rest.over, false);
+  assert.deepEqual(rest.finished, []);
+  assert.equal(rest.players.length, 2);
+
+  // removing two of three in a ranked game ranks the survivor
+  const survivors = removePlayer(removePlayer(base(), "p0", mulberry32(1)), "p1", mulberry32(1));
+
+  assert.equal(survivors.over, true);
+  assert.equal(survivors.winner, "p2");
+
+  // unknown players and finished games change nothing
+  assert.equal(removePlayer(game, "nobody"), game);
+  assert.equal(removePlayer(alone, "p0"), alone);
+}
+
 // === simulated games: always finish, never lose or invent a card ================================
 /** Like a bot, but sometimes takes from the bank even with a card to play. */
 function chaosTurn(state: GameState, rng: () => number): GameState {
@@ -928,6 +1176,7 @@ function chaosTurn(state: GameState, rng: () => number): GameState {
 }
 
 const seen = {
+  stacks: 0,
   attacks: 0,
   jackRequests: 0,
   penalties: 0,
@@ -948,6 +1197,7 @@ for (let seed = 1; seed <= 900; seed++) {
 
   let state = createGame({
     cardsPerPlayer,
+    doubling: seed % 3 !== 0,
     includeJokers,
     mode,
     playerNames: Array.from({ length: playerCount }, (_, i) => `P${i}`),
@@ -998,6 +1248,12 @@ for (let seed = 1; seed <= 900; seed++) {
     assert.ok(state.finished.length >= 1);
   }
 
+  state.events.forEach((event, index) => {
+    const before = state.events[index - 1];
+
+    if (event.type === "play" && before?.type === "play" && before.playerId === event.playerId && before.card.rank === event.card.rank) seen.stacks++;
+  });
+
   for (const event of state.events) {
     if (event.type === "skip") seen.skips++;
     if (event.type === "tie") seen.ties++;
@@ -1010,6 +1266,7 @@ for (let seed = 1; seed <= 900; seed++) {
   longest = Math.max(longest, turns);
 }
 
+assert.ok(seen.stacks > 30, `stacks were played in the simulations: ${seen.stacks}`);
 assert.ok(seen.skips > 50 && seen.penalties > 50 && seen.jackRequests > 50 && seen.twosUnder > 50 && seen.attacks > 50 && seen.ties > 3, `the simulations used every special card: ${JSON.stringify(seen)}`);
 
 console.log(

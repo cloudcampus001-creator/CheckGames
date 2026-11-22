@@ -9,9 +9,12 @@
  * A room made before this file existed has no `social` part. `ensureSocial`
  * gives it one, so old rooms in the store keep working.
  */
-import type { EndMode } from "../cheque-games/engine";
+import type { EndMode, GameEvent } from "../cheque-games/engine";
+import { emptyTally, type GameResult, type Tally } from "../multiplayer/profile";
 import {
   CHAT_MAX_CHARS,
+  CUSTOM_VOTE_MAX_OPTIONS,
+  CUSTOM_VOTE_MIN_OPTIONS,
   type ChatMessage,
   REACTIONS,
   type ReactionEvent,
@@ -23,6 +26,7 @@ import {
 export type VotePatch = {
   cardsPerPlayer?: number;
   jokers?: boolean;
+  doubling?: boolean;
   endMode?: EndMode;
 };
 
@@ -62,6 +66,26 @@ export type Social = {
   voteSeq: number;
   /** No new vote may start before this moment. */
   voteCooldownUntil: number;
+  /** Seconds each turn lasts (0 = no clock). */
+  turnSeconds: number;
+  /** Several cards of the same number may be played together. */
+  doubling: boolean;
+  /** When the player whose turn it is runs out of time, or null. */
+  turnEndsAt: number | null;
+  /** Clocks in a row that ran out, per seat. */
+  timeouts: Record<string, number>;
+  /** Seats the table plays for, until they come back. */
+  away: Record<string, boolean>;
+  /** A quick match found by the system (no host controls). */
+  matchmade: boolean;
+  /** How the latest set ended, for the profiles. */
+  results: GameResult | null;
+  /** What each seat did in the current set. */
+  tallies: Record<string, Tally>;
+  /** How many game events were already counted. */
+  eventsSeen: number;
+  /** Players with a profile who quit in the middle of the current set. */
+  leavers: { profileId: string; name: string; seatId: string; tally: Tally }[];
 };
 
 export type Ok = { ok: true };
@@ -81,14 +105,24 @@ const done: Ok = { ok: true };
 export function newSocial(): Social {
   return {
     autoReturn: true,
+    away: {},
     chat: [],
     chatSeq: 0,
+    doubling: false,
+    eventsSeen: 0,
     finishedAt: null,
     lastChatAt: {},
+    leavers: [],
+    matchmade: false,
     lastReactAt: {},
     ready: {},
     reactSeq: 0,
     reactions: [],
+    results: null,
+    tallies: {},
+    timeouts: {},
+    turnEndsAt: null,
+    turnSeconds: 0,
     vote: null,
     voteCooldownUntil: 0,
     voteSeq: 0,
@@ -230,6 +264,8 @@ export function forgetSeat(social: Social, seatId: string) {
   delete social.wins[seatId];
   delete social.lastChatAt[seatId];
   delete social.lastReactAt[seatId];
+  delete social.timeouts[seatId];
+  delete social.away[seatId];
 
   if (social.vote) {
     delete social.vote.ballots[seatId];
@@ -253,7 +289,7 @@ export function rulesVote(
   topic: unknown,
   maxCards: number,
 ): { title: string; options: VoteOption[] } | null {
-  const topics: VoteTopic[] = ["cards", "jokers", "ending"];
+  const topics: VoteTopic[] = ["cards", "jokers", "ending", "doubling"];
 
   if (!topics.includes(topic as VoteTopic)) {
     return null;
@@ -282,6 +318,16 @@ export function rulesVote(
     };
   }
 
+  if (topic === "doubling") {
+    return {
+      options: [
+        { id: "on", label: "Doubling on", patch: { doubling: true } },
+        { id: "off", label: "No doubling", patch: { doubling: false } },
+      ],
+      title: "Play several cards of the same number together?",
+    };
+  }
+
   return {
     options: [
       { id: "first", label: "Stop at the first win", patch: { endMode: "first" } },
@@ -289,6 +335,72 @@ export function rulesVote(
     ],
     title: "When someone plays their last card?",
   };
+}
+
+/** A question the host wrote, with 2 to 6 choices. */
+export function customVote(
+  question: unknown,
+  rawOptions: unknown,
+): { title: string; options: VoteOption[] } | null {
+  const title = cleanText(question, 80);
+  const list = Array.isArray(rawOptions) ? rawOptions : [];
+  const labels: string[] = [];
+
+  for (const raw of list) {
+    const label = cleanText(raw, 40);
+
+    if (label && !labels.some((seen) => seen.toLowerCase() === label.toLowerCase())) {
+      labels.push(label);
+    }
+  }
+
+  if (title.length < 3 || labels.length < CUSTOM_VOTE_MIN_OPTIONS || labels.length > CUSTOM_VOTE_MAX_OPTIONS) {
+    return null;
+  }
+
+  return {
+    options: labels.map((label, index) => ({ id: `o${index}`, label, patch: null })),
+    title,
+  };
+}
+
+/** Count what a batch of new game events says each seat did. */
+export function tallyEvents(social: Social, events: readonly GameEvent[]) {
+  const of = (id: string) => {
+    social.tallies[id] ??= emptyTally();
+
+    return social.tallies[id];
+  };
+
+  for (const event of events) {
+    if (event.type === "play") {
+      const tally = of(event.playerId);
+
+      tally.played += 1;
+
+      if (event.placement === "top") {
+        if (event.card.rank === "7" || event.card.rank === "joker") {
+          tally.attacks += 1;
+        } else if (event.card.rank === "A") {
+          tally.stops += 1;
+        } else if (event.card.rank === "J") {
+          tally.jacks += 1;
+        }
+      }
+    } else if (event.type === "draw") {
+      const tally = of(event.playerId);
+
+      tally.drawn += 1;
+
+      if (event.forced) {
+        tally.penalty += 1;
+      }
+    } else if (event.type === "check") {
+      of(event.playerId).checks += 1;
+    } else if (event.type === "timeout") {
+      of(event.playerId).timeouts += 1;
+    }
+  }
 }
 
 export type NewVote = {
@@ -391,7 +503,7 @@ export function voteIsDone(
 export function winningOption(vote: Vote, eligible: readonly string[]): string | null {
   const { counts } = tally(vote, eligible);
 
-  if (vote.kind !== "rules") {
+  if (vote.kind === "kick" || vote.kind === "rematch") {
     return (counts.yes ?? 0) * 2 > eligible.length ? "yes" : null;
   }
 
